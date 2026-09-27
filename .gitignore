@@ -31,7 +31,18 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
+
+# AI assistant tooling (local config, not app code)
+.agents/
+.claude/
+.freebuff/
+skills-lock.json
+
+# Local editor config (personal, not shared)
+.vscode/
+AGENTS.md
 
 # typescript
 *.tsbuildinfo

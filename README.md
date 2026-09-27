@@ -1,56 +1,58 @@
-# Welcome to your Expo app 👋
+# Packly — AI Moving Inventory
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Packly is a React Native (Expo) app that turns packing chaos into a searchable,
+photo-documented inventory. Speak or type what's inside each box — AI transcribes
+and itemizes it — and find anything later with instant search across moves,
+rooms, boxes, and items.
 
-## Get started
+## Tech stack
 
-1. Install dependencies
+- **App:** Expo SDK 57, React Native 0.86, TypeScript, Expo Router
+- **Backend:** Supabase — Postgres with row-level security, realtime sync,
+  Storage for box photos, Edge Functions
+- **AI:** Gemini via a Supabase Edge Function (the client never talks to the
+  model directly; audio is never persisted)
+- **Subscriptions:** RevenueCat (`pro` entitlement, $5/month) with a
+  server-authoritative webhook into Postgres
 
-   ```bash
-   npm install
-   ```
+## Repository layout
 
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
+```
+src/app/        Expo Router screens (auth, tabs, move/room/box, settings)
+src/components/ UI components (photo gallery, bottom sheets, modals)
+src/services/   Supabase, auth, photos, voice, credits, entitlements
+src/store/      Zustand stores (auth session, active move)
+packly-ui/      Shared UI kit (theme + primitive components)
+supabase/
+  migrations/   Versioned SQL schema + RLS policies
+  functions/    Edge Functions (process-audio, revenuecat-webhook)
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+## Getting started
 
-### Other setup steps
+```bash
+npm install
+npx expo start        # then press a (Android) with a device connected
+```
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+Environment (`.env`, gitignored):
 
-## Learn more
+```
+EXPO_PUBLIC_SUPABASE_URL=...
+EXPO_PUBLIC_SUPABASE_ANON_KEY=...
+EXPO_PUBLIC_REVENUECAT_API_KEY=...
+```
 
-To learn more about developing your project with Expo, look at the following resources:
+Server secrets (Supabase Edge Function secrets, never in the repo):
+`GEMINI_API_KEY`, `REVENUECAT_WEBHOOK_SECRET`.
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+## Architecture notes
 
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+- **Server-authoritative gating:** Free/Pro plans and AI credits are enforced
+  by Postgres (RLS + triggers), not the client. Webhooks from RevenueCat
+  write entitlements; the UI merely reflects them.
+- **Credit model:** two buckets — signup credits never expire and survive
+  subscription cycles; Pro credits (200/month) expire with the billing
+  period. Consumption is idempotent (operation-id) and fully ledgered.
+- **Photo storage:** membership-scoped folder-based storage policies, so
+  files without a database row are still reachable for cleanup — no orphans.
