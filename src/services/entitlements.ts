@@ -7,10 +7,18 @@
 //   credits are only moved by the webhook RPC. The client can never unlock
 //   anything by tampering with this layer.
 //
-// Dev builds use the RevenueCat TEST STORE API key (EXPO_PUBLIC_REVENUECAT_API_KEY)
-// — test purchases are simulated in-app and still fire sandbox webhooks to
-// Supabase, flipping the user to Pro for real. Never ship with the Test Store
-// key; release builds get the Android-specific API key.
+// This build uses the RevenueCat TEST STORE API key (EXPO_PUBLIC_REVENUECAT_API_KEY,
+// prefix `test_`) — test purchases are simulated in-app and still fire sandbox
+// webhooks to Supabase, flipping the user to Pro for real. A real Play Store
+// release would swap in the Android-specific (Play) API key instead.
+//
+// RevenueCat's native SDK hard-refuses a Test Store key when the APK's
+// android:debuggable manifest flag is false — it kills the app on startup.
+// That flag is NOT the same as JS's __DEV__ (which tracks whether the JS
+// bundle itself was exported in dev mode): this project's `release` build
+// type is marked `debuggable true` by plugins/with-debuggable-release.js
+// (judging-only override) specifically so the distributable APK satisfies
+// this check despite shipping production JS.
 
 import Purchases, {
   LOG_LEVEL,

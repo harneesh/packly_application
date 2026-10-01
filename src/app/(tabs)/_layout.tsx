@@ -3,6 +3,7 @@ import { ActivityIndicator, View, StyleSheet } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAuthStore } from '@/store/auth-store';
+import { colors } from '../../../packly-ui/theme';
 
 export default function TabLayout() {
   const { user, isLoading } = useAuthStore();
@@ -11,7 +12,7 @@ export default function TabLayout() {
   if (isLoading) {
     return (
       <View style={[styles.loading, { paddingTop: insets.top }]}>
-        <ActivityIndicator size="large" color="#208AEF" />
+        <ActivityIndicator size="large" color={colors.primary} />
       </View>
     );
   }

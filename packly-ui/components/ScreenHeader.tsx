@@ -4,18 +4,20 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, spacing } from '../theme';
+import { colors, spacing, fonts } from '../theme';
 
 interface ScreenHeaderProps {
   onBack?: () => void;
   title?: string;
+  /** Optional second line under the title (e.g. "Bathroom, 8 items"). */
+  subtitle?: string;
   right?: React.ReactNode;
   large?: boolean; // bigger title for detail screens (e.g. box name)
 }
 
-export default function ScreenHeader({ onBack, title, right, large }: ScreenHeaderProps) {
+export default function ScreenHeader({ onBack, title, subtitle, right, large }: ScreenHeaderProps) {
   return (
-    <View style={styles.wrap}>
+    <View style={[styles.wrap, subtitle ? styles.wrapTall : null]}>
       <View style={styles.side}>
         {onBack ? (
           <TouchableOpacity onPress={onBack} hitSlop={8} style={styles.backBtn}>
@@ -24,9 +26,25 @@ export default function ScreenHeader({ onBack, title, right, large }: ScreenHead
         ) : null}
       </View>
       {title ? (
-        <Text style={[styles.title, large && styles.titleLarge]} numberOfLines={1} ellipsizeMode="tail">
-          {title}
-        </Text>
+        subtitle ? (
+          /* Two-line title block (title + subtitle) — used by the Box screen,
+             whose header shows the box name and a "Room, N items" line. */
+          <View style={styles.titleBlock}>
+            <Text
+              style={[styles.title, styles.titleInBlock, large && styles.titleLarge]}
+              numberOfLines={1}
+              ellipsizeMode="tail">
+              {title}
+            </Text>
+            <Text style={styles.subtitle} numberOfLines={1} ellipsizeMode="tail">
+              {subtitle}
+            </Text>
+          </View>
+        ) : (
+          <Text style={[styles.title, large && styles.titleLarge]} numberOfLines={1} ellipsizeMode="tail">
+            {title}
+          </Text>
+        )
       ) : (
         <View style={styles.side} />
       )}
@@ -46,9 +64,42 @@ const styles = StyleSheet.create({
     paddingTop: spacing.sm,
     height: 56,
   },
+  // Taller variant while a subtitle adds a second line under the title.
+  wrapTall: { height: 68 },
   side: { flex: 1 },
   rightSide: { alignItems: 'flex-end' },
-  backBtn: { flexDirection: 'row', alignItems: 'center' },
-  title: { flex: 2, textAlign: 'center', fontSize: 16, fontWeight: '700', color: colors.textPrimary },
+  backBtn: {
+    flexDirection: 'row',
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  title: {
+    flex: 2,
+    textAlign: 'center',
+    fontSize: 16,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
   titleLarge: { fontSize: 20 },
+  titleBlock: {
+    flex: 2,
+    alignItems: 'center',
+    gap: 1,
+  },
+  // Inside the stacked block the title must size to its content instead of
+  // growing to fill the column (flex:2 is only for the single-line layout).
+  titleInBlock: { flex: 0 },
+  subtitle: {
+    fontFamily: fonts.medium,
+    fontWeight: '500',
+    fontSize: 13,
+    color: colors.textSecondary,
+  },
 });

@@ -1,7 +1,7 @@
 // components/Button.tsx
 import React, { useRef, useCallback } from 'react';
 import { TouchableOpacity, Text, StyleSheet, ActivityIndicator, Animated, StyleProp, ViewStyle } from 'react-native';
-import { colors, radius, fonts } from '../theme';
+import { colors, radius, shadow, fonts } from '../theme';
 
 interface ButtonProps {
   label: string;
@@ -57,15 +57,19 @@ export default function Button({ label, onPress, variant = 'primary', disabled, 
 const styles = StyleSheet.create({
   base: {
     height: 52,
-    borderRadius: radius.lg,
+    // 2026 redesign: every action button is a pill (mockup §2/§4) — the
+    // filled indigo primary and the bordered ghost secondary share the shape.
+    borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 16,
     borderCurve: 'continuous',
   },
-  primary: { backgroundColor: colors.primary },
+  primary: { backgroundColor: colors.primary, ...shadow.card },
   secondary: { backgroundColor: colors.surface, borderWidth: 1.5, borderColor: colors.border },
   primaryText: { color: colors.textInverse, fontSize: 16, fontFamily: fonts.bold, fontWeight: '700' },
-  secondaryText: { color: colors.textPrimary, fontSize: 16, fontFamily: fonts.bold, fontWeight: '700' },
+  // Ghost pills carry the brand color on their label, matching the modal
+  // Cancel buttons across the app.
+  secondaryText: { color: colors.primary, fontSize: 16, fontFamily: fonts.bold, fontWeight: '700' },
   disabled: { opacity: 0.5 },
 });

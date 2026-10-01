@@ -29,7 +29,7 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#2563EB",
+          "backgroundColor": "#4F46E5",
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
@@ -42,7 +42,8 @@
           "cameraPermission": "Packly needs camera access so you can take photos of packed items for your boxes."
         }
       ],
-      "expo-sharing"
+      "expo-sharing",
+      "./plugins/with-debuggable-release"
     ],
     "experiments": {
       "typedRoutes": true,

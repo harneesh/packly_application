@@ -2,18 +2,17 @@ import { useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native';
-import { FontAwesome } from '@expo/vector-icons';
+import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuthStore } from '@/store/auth-store';
 import { Link } from 'expo-router';
-import { colors, spacing, radius, font, fonts } from '../../../packly-ui/theme';
+import { colors, spacing, radius, font, fonts, shadow } from '../../../packly-ui/theme';
 
 export default function SignInScreen() {
   const [email, setEmail] = useState('');
@@ -39,10 +38,13 @@ export default function SignInScreen() {
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        behavior="padding"
         style={styles.container}
       >
         <View style={styles.header}>
+          <View style={styles.logoTile}>
+            <Ionicons name="cube" size={30} color="#FFFFFF" />
+          </View>
           <Text style={font.largeTitle}>Sign In</Text>
           <Text style={[font.body, { color: colors.textSecondary }]}>
             Sign in to your Packly account
@@ -154,40 +156,60 @@ const styles = StyleSheet.create({
     marginBottom: spacing.xxxl,
     gap: spacing.sm,
   },
+  // Brand mark — indigo tile with the Packly box glyph.
+  logoTile: {
+    width: 64,
+    height: 64,
+    borderRadius: radius.lg,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.sm,
+    borderCurve: 'continuous',
+    ...shadow.card,
+  },
   form: {
     gap: spacing.md,
     marginBottom: spacing.xxxl,
   },
   label: {
-    fontSize: 14,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
+    fontSize: 13,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
     color: colors.textPrimary,
   },
+  // White fields with a hairline border — same field language as TextField.
   input: {
-    backgroundColor: colors.surfaceMuted,
-    borderRadius: radius.md,
-    borderWidth: 1,
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1.5,
     borderColor: colors.border,
     paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+    // Fixed height + zero vertical padding + Android centering: the text is
+    // centred by the box itself on both platforms, instead of depending on
+    // each platform's default input gravity (and never clips the descenders).
+    paddingVertical: 0,
+    textAlignVertical: 'center',
     fontFamily: fonts.regular,
     fontSize: 16,
     color: colors.textPrimary,
     height: 52,
+    borderCurve: 'continuous',
   },
   button: {
     height: 52,
-    borderRadius: radius.lg,
+    borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: spacing.sm,
+    borderCurve: 'continuous',
+    ...shadow.card,
   },
   buttonText: {
     color: '#FFFFFF',
     fontSize: 16,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
+    fontFamily: fonts.bold,
+    fontWeight: '700',
   },
   errorBox: {
     padding: spacing.md,
@@ -209,15 +231,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: spacing.md,
     backgroundColor: colors.surface,
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: colors.border,
-    borderRadius: radius.lg,
+    borderRadius: radius.pill,
     height: 52,
+    borderCurve: 'continuous',
   },
   googleButtonText: {
     fontSize: 16,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
+    fontFamily: fonts.bold,
+    fontWeight: '700',
     color: colors.textPrimary,
   },
   footer: {

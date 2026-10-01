@@ -61,7 +61,7 @@ export default function PhotoSourceSheet({
         onPress={onCancel}
         disabled={busy}
         style={({ pressed }) => [styles.sheetCancel, pressed && { opacity: 0.7 }]}>
-        <Text style={[font.bodyMedium, { color: colors.textSecondary }]}>Cancel</Text>
+        <Text style={[font.headline, { color: colors.primary }]}>Cancel</Text>
       </Pressable>
     </BottomSheet>
   );
@@ -86,16 +86,25 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceMuted,
     borderRadius: radius.lg,
     padding: spacing.lg,
+    borderCurve: 'continuous',
   },
   sheetOptionIcon: {
     width: 40,
     height: 40,
-    borderRadius: radius.lg,
+    borderRadius: radius.md,
     alignItems: 'center',
     justifyContent: 'center',
+    borderCurve: 'continuous',
   },
+  // Ghost pill — matches the Cancel buttons on every other sheet/modal.
   sheetCancel: {
     alignItems: 'center',
-    paddingVertical: spacing.lg,
+    justifyContent: 'center',
+    height: 52,
+    borderRadius: radius.pill,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    borderCurve: 'continuous',
   },
 });

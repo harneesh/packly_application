@@ -43,11 +43,39 @@ export function toFriendlyError(
     return 'Each box can have up to 3 photos.';
   }
 
-  // ── Photos are Pro-only (raised by enforce_box_photo_limit, migration 013).
+  // ── Photos are Pro-only (raised by enforce_box_photo_limit).
   // Also matches PHOTOS_REQUIRE_PRO_WITH_ORPHAN, which carries the same
-  // meaning plus a storage-cleanup warning. ──
+  // meaning plus a storage-cleanup warning.
+  //
+  // Pro belongs to the MOVE, not the person (migration 021): any member whose
+  // subscription covers this move turns photos on for everybody, so the copy
+  // points at the move rather than at a personal upgrade. ──
   if (lower.includes('photos_require_pro')) {
-    return 'Photos are a Pro feature — upgrade to add photos to your boxes.';
+    return 'Photos need Pro — a Pro member of this move can share their plan with everyone in it.';
+  }
+
+  // ── Move membership and owner-only actions (raised by the 021 RPCs) ──
+  if (lower.includes('not_move_owner')) {
+    return 'Only the move owner can do this.';
+  }
+  if (lower.includes('cannot_remove_owner')) {
+    return 'The move owner cannot be removed from their own move.';
+  }
+  if (lower.includes('not_move_member') || lower.includes('not_a_member')) {
+    return 'You are not a member of this move.';
+  }
+  if (lower.includes('not_pro')) {
+    return 'You need an active Pro plan to do this.';
+  }
+  if (lower.includes('invalid_invite_code')) {
+    return 'Invite code not found.';
+  }
+
+  // ── Join throttling (raised by request_to_join_move, migration 023) ──
+  // Checked before the generic "too many" below, which would otherwise answer
+  // with the sign-in rate-limit copy.
+  if (lower.includes('too_many_join_attempts')) {
+    return 'Too many tries. Wait a bit, then try again.';
   }
 
   // ── AI credits (raised by public.consume_voice_credit() / Edge Function) ──

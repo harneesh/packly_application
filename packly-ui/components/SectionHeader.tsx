@@ -6,7 +6,7 @@
 import React from 'react';
 import { View, Text, StyleSheet, type StyleProp, type ViewStyle } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, spacing, font, fonts } from '../theme';
+import { colors, spacing, font, fonts, radius } from '../theme';
 
 interface SectionHeaderProps {
   /** Ionicons name shown left of the title (omit for no icon). */
@@ -22,8 +22,12 @@ export default function SectionHeader({ icon, title, meta, style }: SectionHeade
   return (
     <View style={[styles.header, style]}>
       <View style={styles.left}>
-        {icon ? <Ionicons name={icon} size={18} color={colors.primary} /> : null}
-        <Text style={font.headline}>{title}</Text>
+        {icon ? (
+          <View style={styles.iconTile}>
+            <Ionicons name={icon} size={15} color={colors.accentDeep} />
+          </View>
+        ) : null}
+        <Text style={font.headlineBold}>{title}</Text>
       </View>
       {meta ? <Text style={styles.meta}>{meta}</Text> : null}
     </View>
@@ -42,8 +46,20 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.sm,
   },
+  // Small tile behind the section icon. Yellow (moveSoft + amber glyph) is the
+  // app's icon colour — violet is reserved for buttons — so every section
+  // header reads the same way as Home's move tiles.
+  iconTile: {
+    width: 26,
+    height: 26,
+    borderRadius: radius.sm,
+    backgroundColor: colors.moveSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderCurve: 'continuous',
+  },
   meta: {
-    fontFamily: fonts.regular,
+    fontFamily: fonts.medium,
     fontSize: 13,
     color: colors.textSecondary,
     fontVariant: ['tabular-nums'],

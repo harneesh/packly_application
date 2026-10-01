@@ -37,6 +37,14 @@ export function useUpgrade() {
   const queryClient = useQueryClient();
   const { isPro, ready, refetch } = useEntitlement();
 
+  // A purchase changes the buyer's own balance AND every move their plan
+  // covers (shared Pro pool + photo gate), so all three caches must refresh.
+  const invalidatePlanQueries = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['credits'] });
+    queryClient.invalidateQueries({ queryKey: ['move-plan'] });
+    queryClient.invalidateQueries({ queryKey: ['move-credit-pool'] });
+  }, [queryClient]);
+
   const [isPurchasing, setIsPurchasing] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
 
@@ -48,7 +56,7 @@ export function useUpgrade() {
       // moment to land, then refresh every plan-related view.
       await waitForServerPro();
       await refetch();
-      queryClient.invalidateQueries({ queryKey: ['credits'] });
+      invalidatePlanQueries();
       Alert.alert('Welcome to Pro! 🎉', '200 AI recordings and photo uploads are unlocked.');
     } catch (err) {
       if (!isPurchaseCancelled(err)) {
@@ -57,7 +65,7 @@ export function useUpgrade() {
     } finally {
       setIsPurchasing(false);
     }
-  }, [queryClient, refetch]);
+  }, [invalidatePlanQueries, refetch]);
 
   const restore = useCallback(async () => {
     setIsRestoring(true);
@@ -65,7 +73,7 @@ export function useUpgrade() {
       const state = await restorePurchases();
       if (state.isPro) {
         await waitForServerPro();
-        queryClient.invalidateQueries({ queryKey: ['credits'] });
+        invalidatePlanQueries();
       }
       await refetch();
       Alert.alert(
@@ -81,7 +89,7 @@ export function useUpgrade() {
     } finally {
       setIsRestoring(false);
     }
-  }, [queryClient, refetch]);
+  }, [invalidatePlanQueries, refetch]);
 
   return {
     isPro,

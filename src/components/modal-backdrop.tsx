@@ -19,8 +19,8 @@ import { useEffect, useRef } from 'react';
 import {
   Animated,
   Pressable,
+  ScrollView,
   StyleSheet,
-  View,
 } from 'react-native';
 
 // ──────────────────────────────────────────
@@ -71,12 +71,20 @@ export default function ModalBackdrop({
 
   return (
     <Animated.View style={[styles.backdrop, { opacity: fadeAnim }]}>
-      {onBackdropPress && (
-        <Pressable style={StyleSheet.absoluteFill} onPress={onBackdropPress} />
-      )}
-      <Animated.View style={{ transform: [{ scale: scaleAnim }] }}>
-        {children}
-      </Animated.View>
+      {/* Scrolls only when the keyboard leaves less room than the card needs,
+          so the action buttons can always be reached above the keyboard. */}
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+        bounces={false}>
+        {onBackdropPress && (
+          <Pressable style={StyleSheet.absoluteFill} onPress={onBackdropPress} />
+        )}
+        <Animated.View style={{ transform: [{ scale: scaleAnim }] }}>
+          {children}
+        </Animated.View>
+      </ScrollView>
     </Animated.View>
   );
 }
@@ -88,8 +96,13 @@ export default function ModalBackdrop({
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(20,20,22,0.45)',
+    // Navy-tinted scrim matching ConfirmModal / BottomSheet.
+    backgroundColor: 'rgba(23,26,46,0.45)',
+  },
+  scrollContent: {
+    flexGrow: 1,
     justifyContent: 'center',
     paddingHorizontal: 20,
+    paddingVertical: 20,
   },
 });

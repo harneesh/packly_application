@@ -24,6 +24,12 @@
  *   1 credit = 1 successful recording. The credit is consumed (idempotently,
  *   via operation_id) BEFORE the Gemini call and refunded (idempotently) if
  *   Gemini fails, so users never pay for a failed recording.
+ *
+ *   When the request carries the box being packed, the charge lands on the
+ *   move's shared Pro pool first (any Pro subscriber covering that move) and
+ *   only falls back to the caller's own credits. The move itself is resolved
+ *   server-side from the box id — a client-supplied move id could be used to
+ *   spend a stranger's pool.
  */
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts'
@@ -167,7 +173,7 @@ serve(async (req: Request) => {
   // ── Parse JSON body ──
   // The mobile app now sends audio as base64 in JSON to avoid
   // React Native FormData compatibility issues.
-  let body: { audio?: string; mimeType?: string }
+  let body: { audio?: string; mimeType?: string; boxId?: string }
   try {
     body = await req.json()
   } catch {
@@ -180,6 +186,21 @@ serve(async (req: Request) => {
 
   const base64Audio = body.audio
   const mimeType = body.mimeType || 'audio/m4a'
+
+  // The box being packed, when the client sent one. It is only ever used
+  // server-side to derive the move so a shared Pro pool can pay for this
+  // recording; an absent or malformed value just means "no move scope yet",
+  // and the charge falls back to the caller's own credits.
+  const UUID_RE =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  let boxId: string | null = null
+  if (typeof body.boxId === 'string' && body.boxId.length > 0) {
+    if (UUID_RE.test(body.boxId)) {
+      boxId = body.boxId
+    } else {
+      console.warn('Ignoring malformed boxId in request body.')
+    }
+  }
 
   if (!base64Audio || typeof base64Audio !== 'string') {
     return jsonResponse(
@@ -231,7 +252,7 @@ serve(async (req: Request) => {
 
   const { data: creditsRemaining, error: consumeError } = await serviceClient.rpc(
     'consume_voice_credit',
-    { p_user_id: user.id, p_operation_id: operationId },
+    { p_user_id: user.id, p_operation_id: operationId, p_box_id: boxId },
   )
 
   if (consumeError) {
@@ -243,6 +264,19 @@ serve(async (req: Request) => {
           code: 'OUT_OF_CREDITS',
         },
         402,
+        corsHeaders,
+      )
+    }
+    // The box exists but the caller is not a member of the move it lives in.
+    // A client that can still see a deleted/removed box hits this.
+    if (consumeError.message.includes('NOT_A_MEMBER')) {
+      return jsonResponse(
+        {
+          success: false,
+          error: 'You no longer have access to this box.',
+          code: 'NOT_A_MEMBER',
+        },
+        403,
         corsHeaders,
       )
     }

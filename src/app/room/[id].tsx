@@ -9,17 +9,15 @@ import {
   TextInput,
   Modal,
   KeyboardAvoidingView,
-  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import ScreenHeader from '../../../packly-ui/components/ScreenHeader';
 import ListRow from '../../../packly-ui/components/ListRow';
+import type { BoxStatus } from '../../../packly-ui/components/StatusPill';
 import { Ionicons } from '@expo/vector-icons';
 import SearchWidget from '@/components/search-widget';
-import ConfirmModal from '@/components/confirm-modal';
 import ModalBackdrop from '@/components/modal-backdrop';
-import BottomSheet, { BottomSheetDraggableArea } from '@/components/bottom-sheet';
 import SectionHeader from '../../../packly-ui/components/SectionHeader';
 import { colors, spacing, font, radius, fonts } from '../../../packly-ui/theme';
 import { supabase } from '@/services/supabase';
@@ -27,54 +25,28 @@ import { useRef, useState, useEffect, useCallback } from 'react';
 import { useAuthStore } from '@/store/auth-store';
 import { toFriendlyError } from '@/lib/errors';
 import { fetchBoxPhotosByBox } from '@/services/photos';
+import { fetchBoxes, fetchRoom, ROOM_STALE_MS, type BoxWithCount } from '@/services/rooms';
 import BoxPhotoGallery from '@/components/box-photo-gallery';
 
 
 import type { Box } from '@/types/database';
 
+/**
+ * The kraft tile prints the box's NUMBER (mockup §1: Box 1 → "1").
+ * Extracts the digits from the label; null when there is none.
+ */
+function boxNumberLabel(boxNumber: string): string | null {
+  const match = boxNumber.match(/\d+/);
+  return match ? match[0] : null;
+}
+
 // ──────────────────────────────────────────
 // Data fetching
 // ──────────────────────────────────────────
 
-async function fetchRoom(id: string): Promise<import('@/types/database').Room> {
-  const { data, error } = await supabase
-    .from('rooms')
-    .select('*')
-    .eq('id', id)
-    .single();
-
-  if (error) throw new Error(error.message);
-  return data;
-}
-
-/** Box with a live item count for the list subtitle. */
-type BoxWithCount = Box & { item_count: number };
-
-async function fetchBoxes(roomId: string): Promise<BoxWithCount[]> {
-  const { data, error } = await supabase
-    .from('boxes')
-    .select('*')
-    .eq('room_id', roomId)
-    .order('box_number', { ascending: true });
-
-  if (error) throw new Error(error.message);
-  const boxes = data ?? [];
-  if (boxes.length === 0) return [];
-
-  // Tally items per box so the subtitle under each box name stays current.
-  const boxIds = boxes.map((b) => b.id);
-  const { data: itemRows, error: itemError } = await supabase
-    .from('items')
-    .select('box_id')
-    .in('box_id', boxIds);
-  if (itemError) throw new Error(itemError.message);
-
-  const counts = new Map<string, number>();
-  for (const row of itemRows ?? []) {
-    counts.set(row.box_id, (counts.get(row.box_id) ?? 0) + 1);
-  }
-  return boxes.map((b) => ({ ...b, item_count: counts.get(b.id) ?? 0 }));
-}
+// fetchRoom / fetchBoxes live in @/services/rooms so the Move screen's
+// prefetch and this screen share the exact same query keys (one request,
+// one cache entry).
 
 // ──────────────────────────────────────────
 // Helpers
@@ -125,6 +97,9 @@ export default function RoomDetailsScreen() {
     queryKey: ['room', id],
     queryFn: () => fetchRoom(id!),
     enabled: !!id,
+    // Cache-first: a prefetched/cached room paints instantly; realtime and
+    // explicit invalidations keep it fresh rather than per-mount refetches.
+    staleTime: ROOM_STALE_MS,
   });
 
   const {
@@ -134,30 +109,28 @@ export default function RoomDetailsScreen() {
     queryKey: ['boxes', id],
     queryFn: () => fetchBoxes(id!),
     enabled: !!id,
+    // Live via the boxes/items realtime channels below — no need to refetch
+    // the whole list on every mount.
+    staleTime: ROOM_STALE_MS,
   });
 
   const boxIds = boxes?.map((b) => b.id) ?? [];
 
   // Photos for every box in this room (first photo becomes the box icon).
-  // staleTime: 5 min — serve from cache on navigation, only refetch when stale.
+  // Serve from cache on navigation — the Move screen prefetches these right
+  // after the boxes land, so box thumbnails appear with no extra wait.
   const { data: photosByBox } = useQuery({
     queryKey: ['room-photos', id],
     queryFn: () => fetchBoxPhotosByBox(boxIds),
     enabled: boxIds.length > 0,
-    staleTime: 5 * 60 * 1000,
+    staleTime: ROOM_STALE_MS,
   });
 
   const inputRef = useRef<TextInput>(null);
-  const editRef = useRef<TextInput>(null);
   const [showAddBox, setShowAddBox] = useState(false);
   const [boxName, setBoxName] = useState('');
   const [addBoxError, setAddBoxError] = useState<string | null>(null);
   const [isAddingBox, setIsAddingBox] = useState(false);
-  const [editingBox, setEditingBox] = useState<Box | null>(null);
-  const [editBoxName, setEditBoxName] = useState('');
-  const [editBoxError, setEditBoxError] = useState<string | null>(null);
-  const [isEditingBox, setIsEditingBox] = useState(false);
-  const [actionBox, setActionBox] = useState<Box | null>(null);
   const [galleryBoxId, setGalleryBoxId] = useState<string | null>(null);
 
   const galleryPhotos = galleryBoxId ? (photosByBox?.[galleryBoxId] ?? []) : [];
@@ -215,17 +188,6 @@ export default function RoomDetailsScreen() {
     }
   }, [showAddBox]);
 
-
-
-  useEffect(() => {
-    if (editingBox) {
-      const timer = setTimeout(() => {
-        editRef.current?.focus();
-      }, 100);
-      return () => clearTimeout(timer);
-    }
-  }, [editingBox]);
-
   const handleAddBox = async () => {
     if (!id || !user) return;
 
@@ -258,6 +220,8 @@ export default function RoomDetailsScreen() {
       setBoxName('');
       setShowAddBox(false);
       queryClient.invalidateQueries({ queryKey: ['boxes', id] });
+      // Home's progress card counts boxes across the whole move.
+      queryClient.invalidateQueries({ queryKey: ['moveProgress'] });
     } catch (err) {
       setAddBoxError(toFriendlyError(err, 'Failed to add box.'));
     } finally {
@@ -265,9 +229,32 @@ export default function RoomDetailsScreen() {
     }
   };
 
-  const handleBoxLongPress = (box: Box) => {
-    setActionBox(box);
-  };
+  // ── Toggle packed on a box (same pill behavior as Home) ──
+  // Tap the pill: Empty/Packing → Packed, Packed → Packing. Boxes with no
+  // items can't be marked packed — the pill is disabled ("Empty").
+  const handleTogglePacked = useCallback(
+    async (box: BoxWithCount) => {
+      const nextPacked = !box.is_packed;
+      // Optimistic update — the pill flips instantly.
+      queryClient.setQueryData<BoxWithCount[]>(['boxes', id], (prev) =>
+        prev?.map((b) => (b.id === box.id ? { ...b, is_packed: nextPacked } : b)) ?? prev,
+      );
+      try {
+        const { error } = await supabase
+          .from('boxes')
+          .update({ is_packed: nextPacked })
+          .eq('id', box.id);
+        if (error) throw new Error(error.message);
+      } catch {
+        // Roll back on failure.
+        queryClient.invalidateQueries({ queryKey: ['boxes', id] });
+      }
+      // Home's "x of y boxes packed" caption reads a separate move-wide query
+      // — refresh it so the card is right when this screen is popped.
+      queryClient.invalidateQueries({ queryKey: ['moveProgress'] });
+    },
+    [id, queryClient],
+  );
 
   const openBoxGallery = (box: Box) => {
     const photos = photosByBox?.[box.id];
@@ -280,75 +267,13 @@ export default function RoomDetailsScreen() {
     queryClient.invalidateQueries({ queryKey: ['box-photos', boxId] });
   };
 
-  // ── Custom confirm/error modal state ──
-  const [deleteConfirmBox, setDeleteConfirmBox] = useState<Box | null>(null);
-  const [deleteErrorVisible, setDeleteErrorVisible] = useState(false);
-  const [isDeleting, setIsDeleting] = useState(false);
-
-  const handleDeleteBox = async (box: Box) => {
-    setActionBox(null);
-    setDeleteConfirmBox(box);
-  };
-
-  const performDeleteBox = useCallback(async () => {
-    if (!deleteConfirmBox || !id) return;
-    setIsDeleting(true);
-
-    try {
-      const { error } = await supabase
-        .from('boxes')
-        .delete()
-        .eq('id', deleteConfirmBox.id);
-
-      if (error) throw new Error(error.message);
-
-      setDeleteConfirmBox(null);
-      queryClient.invalidateQueries({ queryKey: ['boxes', id] });
-    } catch {
-      setDeleteConfirmBox(null);
-      setDeleteErrorVisible(true);
-    } finally {
-      setIsDeleting(false);
-    }
-  }, [deleteConfirmBox, id, queryClient]);
-
-  const handleRenameBox = async () => {
-    if (!editingBox || !id) return;
-
-    const trimmed = editBoxName.trim();
-    if (!trimmed) {
-      setEditBoxError('Box label is required.');
-      return;
-    }
-
-    setEditBoxError(null);
-    setIsEditingBox(true);
-
-    try {
-      const { error } = await supabase
-        .from('boxes')
-        .update({ box_number: trimmed })
-        .eq('id', editingBox.id);
-
-      if (error) {
-        if (error.message?.includes('duplicate key')) {
-          throw new Error(`A box with label "${trimmed}" already exists in this room.`);
-        }
-        throw new Error(error.message);
-      }
-
-      setEditingBox(null);
-      setEditBoxName('');
-      queryClient.invalidateQueries({ queryKey: ['boxes', id] });
-    } catch (err) {
-      setEditBoxError(toFriendlyError(err, 'Failed to rename box.'));
-    } finally {
-      setIsEditingBox(false);
-    }
-  };
+  // Box rename/delete moved to the box screen (header ⋯ sheet) — same as Home.
 
   // ── Loading ─────────────────────────────
-  if (roomLoading) {
+  // Only block the whole screen when there is genuinely nothing to show.
+  // A prefetched room (tap on the Move screen) renders immediately and the
+  // rest of the content fills in as it arrives.
+  if (!room && roomLoading) {
     return (
       <View style={[styles.container, styles.centeredContainer]}>
         <SafeAreaView style={styles.centeredSafeArea}>
@@ -388,40 +313,58 @@ export default function RoomDetailsScreen() {
           {/* ── Room Info ──────────────────────── */}
           {/* ── Boxes ──────────────────────────── */}
           <View style={styles.boxesSection}>
-            <SectionHeader title="Boxes" meta={`${boxes?.length ?? 0} boxes`} />
+            {/* Meta is a bare count — the title already says "Boxes". */}
+            <SectionHeader title="Boxes" meta={`${boxes?.length ?? 0}`} />
 
             {boxesLoading ? (
               <ActivityIndicator size="small" color={colors.primary} />
             ) : boxes && boxes.length > 0 ? (
               <View style={styles.boxesList}>
-                {boxes.map((box) => (
-                  <ListRow
-                    key={box.id}
-                    iconType="box"
-                    title={box.box_number}
-                    subtitle={`Qty: ${box.item_count}`}
-                    leadingImage={photosByBox?.[box.id]?.[0]?.url ?? null}
-                    leadingFill
-                    onLeadingPress={
-                      photosByBox?.[box.id]?.length
-                        ? () => openBoxGallery(box)
-                        : undefined
-                    }
-                    onPress={() => router.push({ pathname: '/box/[id]', params: { id: box.id } })}
-                    onMenuPress={() => handleBoxLongPress(box)}
-                  />
-                ))}
+                {boxes.map((box) => {
+                  const status: BoxStatus =
+                    box.is_packed && box.item_count > 0
+                      ? 'packed'
+                      : box.item_count === 0
+                        ? 'empty'
+                        : 'packing';
+                  return (
+                    <ListRow
+                      key={box.id}
+                      iconType="box"
+                      iconLabel={boxNumberLabel(box.box_number)}
+                      title={box.box_number}
+                      subtitle={`${box.item_count} item${box.item_count === 1 ? '' : 's'}`}
+                      status={status}
+                      onStatusPress={
+                        box.item_count === 0 ? undefined : () => handleTogglePacked(box)
+                      }
+                      leadingImage={photosByBox?.[box.id]?.[0]?.url ?? null}
+                      leadingFill
+                      onLeadingPress={
+                        photosByBox?.[box.id]?.length
+                          ? () => openBoxGallery(box)
+                          : undefined
+                      }
+                      onPress={() => router.push({ pathname: '/box/[id]', params: { id: box.id } })}
+                    />
+                  );
+                })}
               </View>
             ) : (
-              <Text style={{ textAlign: 'center', marginTop: spacing.lg, color: colors.textSecondary }}>
-                No boxes yet. Tap "+ Add Box" to create one.
-              </Text>
+              <View style={styles.emptyBoxesCard}>
+                <Text style={styles.emptyBoxesEmoji}>📦</Text>
+                <Text style={styles.emptyBoxesText}>
+                  No boxes yet. Add your first box to start packing.
+                </Text>
+              </View>
             )}
 
+            {/* Ghost pill — same "Add" affordance as the Move screen */}
             <Pressable
-              style={styles.addLink}
+              style={({ pressed }) => [styles.addLink, pressed && { opacity: 0.6 }]}
               onPress={() => setShowAddBox(true)}>
-              <Text style={styles.addLinkText}>+ Add Box</Text>
+              <Ionicons name="add" size={18} color={colors.primary} />
+              <Text style={styles.addLinkText}>Add box</Text>
             </Pressable>
           </View>
         </ScrollView>
@@ -440,7 +383,7 @@ export default function RoomDetailsScreen() {
         }}>
         <KeyboardAvoidingView
           style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          behavior="padding">
           <ModalBackdrop
             visible={showAddBox}
             onBackdropPress={() => {
@@ -451,12 +394,12 @@ export default function RoomDetailsScreen() {
             <View style={[styles.modalCard, { backgroundColor: colors.surface }]}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm }}>
                 <Ionicons name="cube-outline" size={20} color={colors.primary} />
-                <Text style={font.headline}>Add Box</Text>
+                <Text style={font.title}>New box</Text>
               </View>
 
               {addBoxError ? (
-                <View style={[styles.errorBox, { backgroundColor: '#FEE2E2' }]}>
-                  <Text style={{ fontFamily: fonts.regular, color: '#DC2626', fontSize: 13 }}>{addBoxError}</Text>
+                <View style={[styles.errorBox, { backgroundColor: colors.dangerSoft }]}>
+                  <Text style={{ fontFamily: fonts.regular, color: colors.danger, fontSize: 13 }}>{addBoxError}</Text>
                 </View>
               ) : null}
 
@@ -483,20 +426,25 @@ export default function RoomDetailsScreen() {
                     setBoxName('');
                     setAddBoxError(null);
                   }}
-                  style={({ pressed }) => [styles.modalCancelBtn, pressed && styles.pressed]}>
-                  <Text style={{ fontFamily: fonts.regular, color: colors.textSecondary, fontSize: 15 }}>Cancel</Text>
+                  style={({ pressed }) => [
+                    styles.modalPillBtn,
+                    styles.modalPillBtnGhost,
+                    pressed && styles.pressed,
+                  ]}>
+                  <Text style={styles.modalPillGhostText}>Cancel</Text>
                 </Pressable>
                 <Pressable
                   onPress={handleAddBox}
                   disabled={isAddingBox}
                   style={({ pressed }) => [
-                    styles.modalSaveBtn,
-                    { backgroundColor: colors.primary, opacity: isAddingBox || pressed ? 0.7 : 1 },
+                    styles.modalPillBtn,
+                    styles.modalPillBtnPrimary,
+                    pressed && styles.pressed,
                   ]}>
                   {isAddingBox ? (
                     <ActivityIndicator color="#FFFFFF" size="small" />
                   ) : (
-                    <Text style={styles.modalSaveText}>Add</Text>
+                    <Text style={styles.modalPillPrimaryText}>Add box</Text>
                   )}
                 </Pressable>
               </View>
@@ -504,151 +452,14 @@ export default function RoomDetailsScreen() {
           </ModalBackdrop>
         </KeyboardAvoidingView>
       </Modal>
-
-      {/* ── Edit Box Modal ─────────────────── */}
-      <Modal
-        visible={!!editingBox}
-        transparent
-        animationType="none"
-        onRequestClose={() => {
-          setEditingBox(null);
-          setEditBoxName('');
-          setEditBoxError(null);
-        }}>
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-          <ModalBackdrop
-            visible={!!editingBox}
-            onBackdropPress={() => {
-              setEditingBox(null);
-              setEditBoxName('');
-              setEditBoxError(null);
-            }}>
-            <View style={[styles.modalCard, { backgroundColor: colors.surface }]}>
-              <Text style={[font.headline, { marginBottom: spacing.sm }]}>Rename Box</Text>
-
-              {editBoxError ? (
-                <View style={[styles.errorBox, { backgroundColor: '#FEE2E2' }]}>
-                  <Text style={{ fontFamily: fonts.regular, color: '#DC2626', fontSize: 13 }}>{editBoxError}</Text>
-                </View>
-              ) : null}
-
-              <TextInput
-                ref={editRef}
-                style={styles.boxInput}
-                placeholder="Box label"
-                placeholderTextColor={colors.textTertiary}
-                value={editBoxName}
-                onChangeText={(text) => {
-                  setEditBoxName(text);
-                  if (editBoxError) setEditBoxError(null);
-                }}
-                editable={!isEditingBox}
-                returnKeyType="done"
-                onSubmitEditing={handleRenameBox}
-                maxLength={100}
-              />
-
-              <View style={styles.modalActions}>
-                <Pressable
-                  onPress={() => {
-                    setEditingBox(null);
-                    setEditBoxName('');
-                    setEditBoxError(null);
-                  }}
-                  style={({ pressed }) => [styles.modalCancelBtn, pressed && styles.pressed]}>
-                  <Text style={{ fontFamily: fonts.regular, color: colors.textSecondary, fontSize: 15 }}>Cancel</Text>
-                </Pressable>
-                <Pressable
-                  onPress={handleRenameBox}
-                  disabled={isEditingBox}
-                  style={({ pressed }) => [
-                    styles.modalSaveBtn,
-                    { backgroundColor: colors.primary, opacity: isEditingBox || pressed ? 0.7 : 1 },
-                  ]}>
-                  {isEditingBox ? (
-                    <ActivityIndicator color="#FFFFFF" size="small" />
-                  ) : (
-                    <Text style={styles.modalSaveText}>Save</Text>
-                  )}
-                </Pressable>
-              </View>
-            </View>
-          </ModalBackdrop>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      {/* ── Box Action Sheet ──────────────── */}
-      <BottomSheet
-        visible={!!actionBox}
-        onClose={() => setActionBox(null)}
-        sheetStyle={{ backgroundColor: colors.surfaceMuted }}>
-        {/* Title doubles as a full-width drag surface (same as Manage Rooms) */}
-        <BottomSheetDraggableArea style={styles.actionTitleContainer}>
-          <Text style={styles.actionTitle}>{actionBox?.box_number}</Text>
-        </BottomSheetDraggableArea>
-            <Pressable
-              style={({ pressed }) => [styles.actionRow, pressed && { backgroundColor: colors.surfaceMuted }]}
-              onPress={() => {
-                const box = actionBox;
-                setActionBox(null);
-                if (box) {
-                  setEditBoxName(box.box_number);
-                  setEditBoxError(null);
-                  setEditingBox(box);
-                }
-              }}>
-              <Text style={styles.actionRenameText}>Rename</Text>
-            </Pressable>
-            <Pressable
-              style={({ pressed }) => [styles.actionRow, pressed && { backgroundColor: colors.surfaceMuted }]}
-              onPress={() => {
-                const box = actionBox;
-                if (box) handleDeleteBox(box);
-              }}>
-              <Text style={styles.actionDeleteText}>Delete</Text>
-            </Pressable>
-            <View style={[styles.actionCancelSeparator, { backgroundColor: colors.surface }]}>
-              <Pressable
-                style={({ pressed }) => [styles.actionCancelRow, pressed && { opacity: 0.7 }]}
-                onPress={() => setActionBox(null)}>
-                <Text style={styles.actionCancelText}>Cancel</Text>
-              </Pressable>
-            </View>
-      </BottomSheet>
 
       {/* ── Box Photo Gallery (opens from the photo icon) ── */}
       <BoxPhotoGallery
         boxId={galleryBoxId}
+        moveId={room?.move_id}
         photos={galleryPhotos}
         onClose={() => setGalleryBoxId(null)}
         onPhotosChanged={invalidateRoomPhotos}
-      />
-
-      {/* ── Delete Box Confirmation ──────── */}
-      <ConfirmModal
-        visible={!!deleteConfirmBox}
-        title="Delete Box?"
-        message={deleteConfirmBox ? `Are you sure you want to delete "${deleteConfirmBox.box_number}"? All items in this box will also be deleted.` : ''}
-        confirmLabel="Delete"
-        confirmDestructive
-        icon="trash-outline"
-        onConfirm={performDeleteBox}
-        onCancel={() => setDeleteConfirmBox(null)}
-        isLoading={isDeleting}
-      />
-
-      {/* ── Delete Error ────────────────── */}
-      <ConfirmModal
-        visible={deleteErrorVisible}
-        title="Error"
-        message="Failed to delete box. Please try again."
-        confirmLabel="OK"
-        showCancel={false}
-        icon="alert-circle-outline"
-        onConfirm={() => setDeleteErrorVisible(false)}
-        onCancel={() => setDeleteErrorVisible(false)}
       />
     </SafeAreaView>
   );
@@ -699,8 +510,17 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   addLink: {
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: spacing.md,
+    justifyContent: 'center',
+    gap: spacing.xs,
+    marginTop: spacing.md,
+    height: 52,
+    borderRadius: radius.pill,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    borderCurve: 'continuous',
   },
   addLinkText: {
     color: colors.primary,
@@ -709,21 +529,52 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
 
+  // ── Empty boxes (dashed card, same language as Home) ──
+  emptyBoxesCard: {
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingVertical: spacing.xxl,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radius.xl,
+    borderWidth: 1.5,
+    borderStyle: 'dashed',
+    borderColor: colors.dividerStrong,
+    backgroundColor: colors.surfaceMuted,
+    borderCurve: 'continuous',
+  },
+  emptyBoxesEmoji: {
+    fontSize: 26,
+    lineHeight: 32,
+  },
+  emptyBoxesText: {
+    fontFamily: fonts.medium,
+    fontSize: 14,
+    color: colors.textSecondary,
+    textAlign: 'center',
+  },
+
   // ── Box Input ────────────────────────
   boxInput: {
-    backgroundColor: colors.surfaceMuted,
+    backgroundColor: colors.surface,
+    borderWidth: 2,
+    borderColor: colors.primary,
     borderRadius: radius.md,
     paddingHorizontal: spacing.lg,
+    // Height owns the vertical rhythm; zero padding + Android centering keeps
+    // the typed text dead-centre on both platforms.
+    paddingVertical: 0,
+    textAlignVertical: 'center',
     height: 56,
-    fontFamily: fonts.regular,
-    fontSize: 16,
+    fontFamily: fonts.semiBold,
+    fontWeight: '600',
+    fontSize: 17,
     color: colors.textPrimary,
   },
 
   // ── Modal ───────────────────────────
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(20,20,22,0.45)',
+    backgroundColor: 'rgba(23,26,46,0.45)',
     justifyContent: 'center',
     paddingHorizontal: spacing.xl,
   },
@@ -736,79 +587,37 @@ const styles = StyleSheet.create({
   },
   modalActions: {
     flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: spacing.sm,
+    gap: spacing.md,
   },
-  modalCancelBtn: {
-    paddingHorizontal: spacing.lg,
+  modalPillBtn: {
+    flex: 1,
     height: 52,
+    borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  modalSaveBtn: {
-    paddingHorizontal: spacing.xxl,
-    height: 52,
-    borderRadius: radius.lg,
-    alignItems: 'center',
-    justifyContent: 'center',
-    minWidth: 60,
+  modalPillBtnGhost: {
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
   },
-  modalSaveText: {
+  modalPillBtnPrimary: {
+    backgroundColor: colors.primary,
+  },
+  modalPillGhostText: {
+    color: colors.primary,
+    fontSize: 15,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
+  },
+  modalPillPrimaryText: {
     color: '#FFFFFF',
     fontSize: 15,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
+    fontFamily: fonts.bold,
+    fontWeight: '700',
   },
   errorBox: {
     padding: spacing.sm,
     borderRadius: radius.sm,
-  },
-
-  actionTitleContainer: {
-    paddingVertical: spacing.lg,
-    paddingHorizontal: spacing.xl,
-    borderBottomWidth: 0.5,
-    borderBottomColor: colors.border,
-    alignItems: 'center',
-  },
-  actionTitle: {
-    fontSize: 13,
-    fontFamily: fonts.medium,
-    fontWeight: '500',
-    color: colors.textTertiary,
-  },
-  actionRow: {
-    paddingVertical: spacing.lg,
-    paddingHorizontal: spacing.xl,
-    alignItems: 'center',
-  },
-  actionRenameText: {
-    fontSize: 20,
-    fontFamily: fonts.regular,
-    fontWeight: '400',
-    color: colors.primary,
-  },
-  actionDeleteText: {
-    fontSize: 20,
-    fontFamily: fonts.regular,
-    fontWeight: '400',
-    color: colors.danger,
-  },
-  actionCancelSeparator: {
-    marginTop: spacing.sm,
-    paddingTop: spacing.xs,
-    borderRadius: 16,
-    overflow: 'hidden',
-  },
-  actionCancelRow: {
-    paddingVertical: spacing.lg,
-    paddingHorizontal: spacing.xl,
-    alignItems: 'center',
-  },
-  actionCancelText: {
-    fontSize: 20,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
-    color: colors.primary,
   },
 });

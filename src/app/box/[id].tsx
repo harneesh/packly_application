@@ -9,7 +9,6 @@ import {
   TextInput,
   Modal,
   KeyboardAvoidingView,
-  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -30,12 +29,16 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, font, radius, shadow, fonts } from '../../../packly-ui/theme';
 import { supabase } from '@/services/supabase';
 import { processAudio } from '@/services/voice';
-import { fetchCreditBalance, type CreditBalance } from '@/services/credits';
+import { fetchCreditBalance } from '@/services/credits';
+import { useMoveCreditPool } from '@/hooks/use-move-plan';
 import ConfirmModal from '@/components/confirm-modal';
 import ModalBackdrop from '@/components/modal-backdrop';
 import LabelPromptModal from '@/components/label-prompt-modal';
 import BoxPhotos from '@/components/box-photos';
 import SectionHeader from '../../../packly-ui/components/SectionHeader';
+import { fetchRoom, ROOM_STALE_MS } from '@/services/rooms';
+import { fetchPhotos } from '@/services/photos';
+import BottomSheet, { BottomSheetDraggableArea } from '@/components/bottom-sheet';
 import { toFriendlyError } from '@/lib/errors';
 import { useRef, useState, useEffect, useCallback } from 'react';
 import { BackHandler } from 'react-native';
@@ -81,7 +84,7 @@ function RecordingWaveform() {
             width: 4,
             height: 28,
             borderRadius: 2,
-            backgroundColor: '#FFFFFF',
+            backgroundColor: colors.accent,
             opacity: anim,
             transform: [{ scaleY: anim }],
           }}
@@ -216,6 +219,16 @@ export default function BoxDetailsScreen() {
     enabled: !!id,
   });
 
+  // Room name for the header subtitle ("Bathroom, 8 items"). Shares the
+  // ['room', id] cache entry with the Room screen, so navigating Room → Box
+  // paints the subtitle instantly instead of round-tripping.
+  const { data: room } = useQuery({
+    queryKey: ['room', box?.room_id],
+    queryFn: () => fetchRoom(box!.room_id),
+    enabled: !!box?.room_id,
+    staleTime: ROOM_STALE_MS,
+  });
+
   // ── AI credits (1 credit = 1 voice recording) ──
   // Cached for a minute; updated optimistically after each recording and
   // refetched when the server reports OUT_OF_CREDITS.
@@ -225,7 +238,26 @@ export default function BoxDetailsScreen() {
     staleTime: 60 * 1000,
   });
   const creditsRemaining = credits?.balance ?? null;
-  const outOfCredits = creditsRemaining === 0;
+
+  // Pro is shared with the move: the server spends the move's pooled Pro
+  // credits BEFORE this user's own, so the recordings actually available here
+  // are the personal balance plus whatever a covering member contributed. A
+  // member with no credits of their own can still record inside a Pro move.
+  const { pool: sharedCreditPool } = useMoveCreditPool(room?.move_id);
+  const availableCredits =
+    creditsRemaining === null ? null : creditsRemaining + (sharedCreditPool ?? 0);
+  const outOfCredits = availableCredits === 0;
+
+  // ── Photo count — shares the ['box-photos', id] cache entry BoxPhotos
+  // populates below, so it costs no extra request. Drives the delete
+  // confirmation, which only mentions photos when the box actually has some.
+  const { data: boxPhotos } = useQuery({
+    queryKey: ['box-photos', id],
+    queryFn: () => fetchPhotos(id!),
+    enabled: !!id,
+    staleTime: 5 * 60 * 1000,
+  });
+  const boxPhotoCount = boxPhotos?.length ?? 0;
 
   const inputRef = useRef<TextInput>(null);
   const editRef = useRef<TextInput>(null);
@@ -266,6 +298,17 @@ export default function BoxDetailsScreen() {
   const [showLabelPrompt, setShowLabelPrompt] = useState(false);
   const [isSettingLabel, setIsSettingLabel] = useState(false);
 
+  // ── Box action sheet (moved from Home rows; opens from the header ⋯) ──
+  const [showBoxSheet, setShowBoxSheet] = useState(false);
+  const [editingBox, setEditingBox] = useState<Box | null>(null);
+  const [editBoxName, setEditBoxName] = useState('');
+  const [editBoxError, setEditBoxError] = useState<string | null>(null);
+  const [isEditingBox, setIsEditingBox] = useState(false);
+  const editBoxRef = useRef<TextInput>(null);
+  const [deleteConfirmBox, setDeleteConfirmBox] = useState<Box | null>(null);
+  const [isDeletingBox, setIsDeletingBox] = useState(false);
+  const [deleteBoxErrorVisible, setDeleteBoxErrorVisible] = useState(false);
+
   // ── Show label prompt when box loads and label is not written ──
   useEffect(() => {
     if (box && !box.label_written && !boxLoading) {
@@ -297,6 +340,87 @@ export default function BoxDetailsScreen() {
   const handleSkipLabel = useCallback(() => {
     router.back();
   }, []);
+
+  // ── Box rename/delete (moved from the Home row ⋯ sheet) ──
+  // Uses the room id from the loaded box so cache invalidation works the
+  // same way it did on Home (roomBoxes / boxes queries).
+  const handleRenameBox = useCallback(async () => {
+    if (!editingBox || !id) return;
+
+    const trimmed = editBoxName.trim();
+    if (!trimmed) {
+      setEditBoxError('Box label is required.');
+      return;
+    }
+
+    setEditBoxError(null);
+    setIsEditingBox(true);
+
+    try {
+      const { error } = await supabase
+        .from('boxes')
+        .update({ box_number: trimmed })
+        .eq('id', editingBox.id);
+
+      if (error) {
+        if (error.message?.includes('duplicate key') || error.message?.includes('unique constraint')) {
+          throw new Error(`A box with label "${trimmed}" already exists in this room.`);
+        }
+        throw new Error(error.message);
+      }
+
+      setEditingBox(null);
+      setEditBoxName('');
+      queryClient.invalidateQueries({ queryKey: ['box', id] });
+      queryClient.invalidateQueries({ queryKey: ['roomBoxes', editingBox.room_id] });
+      queryClient.invalidateQueries({ queryKey: ['boxes', editingBox.room_id] });
+    } catch (err) {
+      setEditBoxError(toFriendlyError(err, 'Failed to rename box.'));
+    } finally {
+      setIsEditingBox(false);
+    }
+  }, [editingBox, editBoxName, id, queryClient]);
+
+  const performDeleteBox = useCallback(async () => {
+    if (!deleteConfirmBox || !id) return;
+    setIsDeletingBox(true);
+
+    try {
+      // Remove storage files BEFORE the DB cascade deletes the box row
+      // (storage DELETE RLS requires the box to exist) — same order Home used.
+      const { deleteStorageForBoxIds } = await import('@/services/photos');
+      await deleteStorageForBoxIds([deleteConfirmBox.id]);
+
+      const { error } = await supabase
+        .from('boxes')
+        .delete()
+        .eq('id', deleteConfirmBox.id);
+
+      if (error) throw new Error(error.message);
+
+      setDeleteConfirmBox(null);
+      queryClient.invalidateQueries({ queryKey: ['roomBoxes', deleteConfirmBox.room_id] });
+      queryClient.invalidateQueries({ queryKey: ['boxes', deleteConfirmBox.room_id] });
+      // Home's progress card tallies boxes for the whole move.
+      queryClient.invalidateQueries({ queryKey: ['moveProgress'] });
+      router.back();
+    } catch {
+      setDeleteConfirmBox(null);
+      setDeleteBoxErrorVisible(true);
+    } finally {
+      setIsDeletingBox(false);
+    }
+  }, [deleteConfirmBox, id, queryClient]);
+
+  // ── Focus rename input when the modal opens ──
+  useEffect(() => {
+    if (editingBox) {
+      const timer = setTimeout(() => {
+        editBoxRef.current?.focus();
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [editingBox]);
 
   // ── Auto-open review modal when items are extracted ──
   useEffect(() => {
@@ -391,7 +515,7 @@ export default function BoxDetailsScreen() {
   }, [voiceState]);
 
   const startRecording = useCallback(async () => {
-    if (creditsRemaining === 0) {
+    if (availableCredits === 0) {
       setVoiceError('You are out of AI credits.');
       setVoiceState('error');
       return;
@@ -431,7 +555,7 @@ export default function BoxDetailsScreen() {
       setVoiceError('Unable to start recording. Please try again.');
       setVoiceState('error');
     }
-  }, [audioRecorder, creditsRemaining]);
+  }, [audioRecorder, availableCredits]);
 
   const stopAndProcessRecording = useCallback(async () => {
     if (!id) return;
@@ -450,17 +574,18 @@ export default function BoxDetailsScreen() {
 
       await setAudioModeAsync({ allowsRecording: false });
 
-      const result = await processAudio(uri);
+      // Pass the box so the server can bill the move's shared Pro pool first.
+      const result = await processAudio(uri, id);
 
       if (result.success) {
         setExtractedItems(result.items);
         setVoiceState('done');
-        // Optimistically sync the cached balance with the server's count.
+        // The server reports the total available for this recording, which may
+        // be the move's shared pool rather than this user's own balance — so
+        // refetch instead of writing the number straight into the personal
+        // balance cache.
         if (typeof result.creditsRemaining === 'number') {
-          queryClient.setQueryData<CreditBalance>(['credits'], (prev) => ({
-            balance: result.creditsRemaining!,
-            expiresAt: prev?.expiresAt ?? null,
-          }));
+          queryClient.invalidateQueries({ queryKey: ['credits'] });
         }
       } else {
         if (result.code === 'OUT_OF_CREDITS') {
@@ -725,45 +850,80 @@ export default function BoxDetailsScreen() {
     );
   }
 
+  // ── Item count — drives the header subtitle (mockup: "Bathroom, 8 items") ──
+  const itemCount = items?.length ?? 0;
+  const itemCountLabel = `${itemCount} item${itemCount === 1 ? '' : 's'}`;
+
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
         <View style={styles.container}>
-        <ScreenHeader onBack={handleBack} title={box.box_number} large />
+        <ScreenHeader
+          onBack={handleBack}
+          title={box.box_number}
+          subtitle={room?.name ? `${room.name}, ${itemCountLabel}` : itemCountLabel}
+          large
+          right={
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Box options"
+              onPress={() => setShowBoxSheet(true)}
+              hitSlop={8}
+              style={({ pressed }) => [styles.headerAction, pressed && { opacity: 0.6 }]}>
+              <Ionicons name="ellipsis-horizontal" size={18} color={colors.textPrimary} />
+            </Pressable>
+          }
+        />
 
         <ScrollView
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}>
 
-          {/* ── Hero Recording Card ────────────── */}
-
           {/* ── Voice Section ──────────────────── */}
           <View>
             <SectionHeader icon="mic-outline" title="Voice" style={{ paddingHorizontal: spacing.xl }} />
-            <Text style={styles.voiceHint}>
-              Speak naturally — Packly turns your recording into items.
-            </Text>
 
           {voiceState === 'idle' && (
             <View style={styles.heroCard}>
+              {/* Indigo mic disc inside a soft halo (mockup: the hero of the
+                  Box screen). Tap = start recording, same handler as before. */}
               <Pressable
                 onPress={startRecording}
                 disabled={outOfCredits}
+                accessibilityRole="button"
+                accessibilityLabel="Start recording"
                 style={({ pressed }) => [
-                  styles.micButton,
-                  pressed && { transform: [{ scale: 0.95 }] },
-                  outOfCredits && styles.micButtonDisabled,
+                  styles.micHalo,
+                  pressed && { transform: [{ scale: 0.97 }] },
+                  outOfCredits && styles.micHaloDisabled,
                 ]}>
-                <Ionicons name="mic-outline" size={52} color="#FFFFFF" />
+                <View style={[styles.micButton, outOfCredits && styles.micButtonDisabled]}>
+                  {/* Ink mic on the accent disc — same yellow-is-for-icons
+                      language as Home's move tiles. */}
+                  <Ionicons name="mic" size={44} color={colors.navyDeep} />
+                </View>
               </Pressable>
+              <Text style={styles.heroTitle}>Tap and say what you packed</Text>
               <ExamplePhrases />
-              {creditsRemaining !== null && (
-                <Text style={styles.creditsLeft}>
-                  {outOfCredits
-                    ? 'Upgrade to Pro for more recordings'
-                    : `${creditsRemaining} recording${creditsRemaining !== 1 ? 's' : ''} left`}
-                </Text>
+              {availableCredits !== null && (
+                <View
+                  style={[
+                    styles.creditsPill,
+                    outOfCredits && { backgroundColor: colors.dangerSoft },
+                  ]}>
+                  <Text
+                    style={[styles.creditsPillText, outOfCredits && { color: colors.danger }]}>
+                    {outOfCredits
+                      ? 'Upgrade to Pro for more recordings'
+                      : `${availableCredits} recording${availableCredits !== 1 ? 's' : ''} left`}
+                  </Text>
+                </View>
               )}
+              {sharedCreditPool !== null && sharedCreditPool > 0 ? (
+                <Text style={styles.sharedCreditsHint}>
+                  {sharedCreditPool} of these are shared with this move by a Pro member
+                </Text>
+              ) : null}
             </View>
           )}
 
@@ -777,7 +937,7 @@ export default function BoxDetailsScreen() {
           {voiceState === 'recording' && (
             <View style={[styles.heroCard, styles.heroCardRecording]}>
               <View style={styles.micButtonActive}>
-                <Ionicons name="mic" size={52} color="#FFFFFF" />
+                <Ionicons name="mic" size={52} color={colors.navyDeep} />
               </View>
               <RecordingWaveform />
               <Text style={styles.recordingTimer}>{formatTime(recordingSeconds)}</Text>
@@ -866,67 +1026,74 @@ export default function BoxDetailsScreen() {
           </View>
 
           {/* ── Photos Section ─────────────────────── */}
-          <BoxPhotos boxId={id} />
+          <BoxPhotos boxId={id} moveId={room?.move_id} />
 
           {/* ── Items Section ──────────────────────── */}
           <View style={styles.itemsSection}>
-            <SectionHeader
-              title="Items in this Box"
-              meta={`Items: ${items?.length ?? 0}`}
-              style={{ paddingHorizontal: spacing.xl }}
-            />
+            {/* No extra horizontal padding: itemsSection already pads, so the
+                header lines up with the left edge of the item cards. */}
+            <SectionHeader title="Items" meta={`${items?.length ?? 0}`} />
 
             {itemsLoading ? (
               <ActivityIndicator size="small" color={colors.primary} />
             ) : items && items.length > 0 ? (
+              /* One white card per item (mockup: separate rounded rows) */
               <View style={styles.itemsList}>
-                    {items.map((item) => {
-                      const itemKey = item.id;
-                      return (
-                        <View key={itemKey} style={styles.itemRow}>
-                          <View style={styles.itemRowLeft}>
-                            <View style={[styles.itemDot, { backgroundColor: colors.itemSoft }]}>
-                              <Ionicons name="cube-outline" size={12} color={colors.item} />
-                            </View>
-                            <Text style={styles.itemName} numberOfLines={1} ellipsizeMode="tail">
-                              {item.name}
-                            </Text>
-                          </View>
-                          <View style={styles.itemActions}>
-                            <Pressable
-                              onPress={() => {
-                                setEditItemName(item.name);
-                                setEditItemError(null);
-                                setEditingItem(item);
-                              }}
-                              style={({ pressed }) => [
-                                styles.itemActionBtn,
-                                pressed && { opacity: 0.6 },
-                              ]}>
-                              <Ionicons name="pencil-outline" size={16} color={colors.textTertiary} />
-                            </Pressable>
-                            <Pressable
-                              onPress={() => handleDeleteItem(item)}
-                              style={({ pressed }) => [
-                                styles.itemActionBtn,
-                                pressed && { opacity: 0.6 },
-                              ]}>
-                              <Ionicons name="trash-outline" size={16} color={colors.danger} />
-                            </Pressable>
-                          </View>
-                        </View>
-                      );
-                    })}
+                {items.map((item) => (
+                  <View key={item.id} style={styles.itemRow}>
+                    <View style={styles.itemDot}>
+                      <Ionicons name="cube-outline" size={18} color={colors.item} />
+                    </View>
+                    <Text style={styles.itemName} numberOfLines={1} ellipsizeMode="tail">
+                      {item.name}
+                    </Text>
+                    <View style={styles.itemActions}>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`Rename ${item.name}`}
+                        onPress={() => {
+                          setEditItemName(item.name);
+                          setEditItemError(null);
+                          setEditingItem(item);
+                        }}
+                        style={({ pressed }) => [
+                          styles.itemActionBtn,
+                          pressed && { opacity: 0.6 },
+                        ]}>
+                        <Ionicons name="pencil-outline" size={18} color={colors.textSecondary} />
+                      </Pressable>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`Delete ${item.name}`}
+                        onPress={() => handleDeleteItem(item)}
+                        style={({ pressed }) => [
+                          styles.itemActionBtn,
+                          pressed && { opacity: 0.6 },
+                        ]}>
+                        <Ionicons name="trash-outline" size={18} color={colors.danger} />
+                      </Pressable>
+                    </View>
+                  </View>
+                ))}
               </View>
             ) : (
               <View style={styles.emptyState}>
                 <View style={styles.emptyIconContainer}>
-                  <Ionicons name="cube-outline" size={36} color={colors.textTertiary} />
+                  <Ionicons name="cube-outline" size={26} color={colors.accentDeep} />
                 </View>
                 <Text style={styles.emptyTitle}>No items yet</Text>
                 <Text style={styles.emptyDescription}>
                   Record your voice or add items manually.
                 </Text>
+                <Pressable
+                  onPress={() => setShowAddItem(true)}
+                  style={({ pressed }) => [
+                    styles.emptyAddBtn,
+                    pressed && { opacity: 0.85 },
+                  ]}>
+                  <Ionicons name="add" size={18} color={colors.textInverse} />
+                  <Text style={styles.emptyAddText}>Add first item</Text>
+                </Pressable>
               </View>
             )}
           </View>
@@ -937,9 +1104,10 @@ export default function BoxDetailsScreen() {
           onPress={() => setShowAddItem(true)}
           style={({ pressed }) => [
             styles.fab,
-            pressed && { transform: [{ scale: 0.92 }] },
+            pressed && { transform: [{ scale: 0.96 }] },
           ]}>
-          <Ionicons name="add" size={28} color="#FFFFFF" />
+          <Ionicons name="add" size={22} color={colors.textInverse} />
+          <Text style={styles.fabText}>Add item</Text>
         </Pressable>
       </View>
 
@@ -955,7 +1123,7 @@ export default function BoxDetailsScreen() {
         }}>
         <KeyboardAvoidingView
           style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          behavior="padding">
           <ModalBackdrop
             visible={showAddItem}
             onBackdropPress={() => {
@@ -964,11 +1132,16 @@ export default function BoxDetailsScreen() {
               setAddItemError(null);
             }}>
             <View style={[styles.modalCard, { backgroundColor: colors.surface }]}>
-              <Text style={[font.headline, { marginBottom: spacing.sm }]}>Add Item</Text>
+              <View style={styles.modalTitleRow}>
+                <View style={styles.modalTitleIcon}>
+                  <Ionicons name="cube-outline" size={18} color={colors.primary} />
+                </View>
+                <Text style={font.title}>Add Item</Text>
+              </View>
 
               {addItemError ? (
-                <View style={[styles.errorBox, { backgroundColor: '#FEE2E2' }]}>
-                  <Text style={{ fontFamily: fonts.regular, color: '#DC2626', fontSize: 13 }}>{addItemError}</Text>
+                <View style={[styles.errorBox, { backgroundColor: colors.dangerSoft }]}>
+                  <Text style={{ fontFamily: fonts.regular, color: colors.danger, fontSize: 13 }}>{addItemError}</Text>
                 </View>
               ) : null}
 
@@ -995,20 +1168,21 @@ export default function BoxDetailsScreen() {
                     setItemName('');
                     setAddItemError(null);
                   }}
-                  style={({ pressed }) => [styles.modalCancelBtn, pressed && styles.pressed]}>
-                  <Text style={{ fontFamily: fonts.regular, color: colors.textSecondary, fontSize: 15 }}>Cancel</Text>
+                  style={({ pressed }) => [styles.modalPillBtn, styles.modalPillBtnGhost, pressed && styles.pressed]}>
+                  <Text style={styles.modalPillGhostText}>Cancel</Text>
                 </Pressable>
                 <Pressable
                   onPress={handleAddItem}
                   disabled={isAddingItem}
                   style={({ pressed }) => [
-                    styles.modalSaveBtn,
-                    { backgroundColor: colors.primary, opacity: isAddingItem || pressed ? 0.7 : 1 },
+                    styles.modalPillBtn,
+                    styles.modalPillBtnPrimary,
+                    pressed && styles.pressed,
                   ]}>
                   {isAddingItem ? (
-                    <ActivityIndicator color="#FFFFFF" size="small" />
+                    <ActivityIndicator color={colors.textInverse} size="small" />
                   ) : (
-                    <Text style={styles.modalSaveText}>Add</Text>
+                    <Text style={styles.modalPillPrimaryText}>Add</Text>
                   )}
                 </Pressable>
               </View>
@@ -1075,7 +1249,7 @@ export default function BoxDetailsScreen() {
         }}>
         <KeyboardAvoidingView
           style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          behavior="padding">
           <ModalBackdrop
             visible={!!editingItem}
             onBackdropPress={() => {
@@ -1084,11 +1258,16 @@ export default function BoxDetailsScreen() {
               setEditItemError(null);
             }}>
             <View style={[styles.modalCard, { backgroundColor: colors.surface }]}>
-              <Text style={[font.headline, { marginBottom: spacing.sm }]}>Rename Item</Text>
+              <View style={styles.modalTitleRow}>
+                <View style={styles.modalTitleIcon}>
+                  <Ionicons name="pencil-outline" size={18} color={colors.primary} />
+                </View>
+                <Text style={font.title}>Rename Item</Text>
+              </View>
 
               {editItemError ? (
-                <View style={[styles.errorBox, { backgroundColor: '#FEE2E2' }]}>
-                  <Text style={{ fontFamily: fonts.regular, color: '#DC2626', fontSize: 13 }}>{editItemError}</Text>
+                <View style={[styles.errorBox, { backgroundColor: colors.dangerSoft }]}>
+                  <Text style={{ fontFamily: fonts.regular, color: colors.danger, fontSize: 13 }}>{editItemError}</Text>
                 </View>
               ) : null}
 
@@ -1115,20 +1294,21 @@ export default function BoxDetailsScreen() {
                     setEditItemName('');
                     setEditItemError(null);
                   }}
-                  style={({ pressed }) => [styles.modalCancelBtn, pressed && styles.pressed]}>
-                  <Text style={{ fontFamily: fonts.regular, color: colors.textSecondary, fontSize: 15 }}>Cancel</Text>
+                  style={({ pressed }) => [styles.modalPillBtn, styles.modalPillBtnGhost, pressed && styles.pressed]}>
+                  <Text style={styles.modalPillGhostText}>Cancel</Text>
                 </Pressable>
                 <Pressable
                   onPress={handleRenameItem}
                   disabled={isEditingItem}
                   style={({ pressed }) => [
-                    styles.modalSaveBtn,
-                    { backgroundColor: colors.primary, opacity: isEditingItem || pressed ? 0.7 : 1 },
+                    styles.modalPillBtn,
+                    styles.modalPillBtnPrimary,
+                    pressed && styles.pressed,
                   ]}>
                   {isEditingItem ? (
-                    <ActivityIndicator color="#FFFFFF" size="small" />
+                    <ActivityIndicator color={colors.textInverse} size="small" />
                   ) : (
-                    <Text style={styles.modalSaveText}>Save</Text>
+                    <Text style={styles.modalPillPrimaryText}>Save</Text>
                   )}
                 </Pressable>
               </View>
@@ -1147,13 +1327,13 @@ export default function BoxDetailsScreen() {
           <SafeAreaView style={styles.reviewSafeArea}>
             {/* Header */}
             <View style={styles.reviewHeader}>
-              <Text style={[font.headline, { textAlign: 'center', flex: 1 }]}>Review Items</Text>
+              <Text style={[font.title, { textAlign: 'center', flex: 1 }]}>Review Items</Text>
             </View>
 
             {/* Error banner */}
             {reviewError && (
-              <View style={[styles.errorBox, { backgroundColor: '#FEE2E2', marginHorizontal: spacing.xl }]}>
-                <Text style={{ fontFamily: fonts.regular, color: '#DC2626', fontSize: 13 }}>{reviewError}</Text>
+              <View style={[styles.errorBox, { backgroundColor: colors.dangerSoft, marginHorizontal: spacing.xl }]}>
+                <Text style={{ fontFamily: fonts.regular, color: colors.danger, fontSize: 13 }}>{reviewError}</Text>
               </View>
             )}
 
@@ -1245,8 +1425,12 @@ export default function BoxDetailsScreen() {
               <Pressable
                 onPress={handleCancelReview}
                 disabled={isSavingReview}
-                style={({ pressed }) => [styles.reviewActionBtn, pressed && styles.pressed]}>
-                <Text style={{ fontFamily: fonts.regular, color: colors.textSecondary, fontSize: 16 }}>Cancel</Text>
+                style={({ pressed }) => [
+                  styles.reviewActionBtn,
+                  styles.reviewActionCancel,
+                  pressed && styles.pressed,
+                ]}>
+                <Text style={styles.reviewActionCancelText}>Cancel</Text>
               </Pressable>
               <Pressable
                 onPress={handleConfirmReview}
@@ -1254,12 +1438,11 @@ export default function BoxDetailsScreen() {
                 style={({ pressed }) => [
                   styles.reviewActionSave,
                   {
-                    backgroundColor: colors.primary,
                     opacity: pressed || isSavingReview || reviewItems.length === 0 ? 0.5 : 1,
                   },
                 ]}>
                 {isSavingReview ? (
-                  <ActivityIndicator color="#FFFFFF" size="small" />
+                  <ActivityIndicator color={colors.textInverse} size="small" />
                 ) : (
                   <Text style={styles.reviewActionSaveText}>
                     Save {reviewItems.length > 0 ? `(${reviewItems.length})` : ''}
@@ -1271,7 +1454,168 @@ export default function BoxDetailsScreen() {
         </View>
       </Modal>
 
-      {/* ── Label Prompt ────────────────── */}
+      {/* ── Box Action Sheet (header ⋯; Home rows long-press into the same
+             sheet) — card rows + ghost cancel, like every other sheet. ── */}
+      <BottomSheet
+        visible={showBoxSheet}
+        onClose={() => setShowBoxSheet(false)}
+        sheetStyle={{
+          backgroundColor: colors.surface,
+          paddingHorizontal: spacing.xl,
+          paddingTop: spacing.xs,
+          gap: spacing.md,
+        }}>
+        <BottomSheetDraggableArea style={styles.boxSheetTitleWrap}>
+          <Text style={[font.headline, styles.boxSheetTitle]}>{box?.box_number}</Text>
+        </BottomSheetDraggableArea>
+
+        <Pressable
+          style={({ pressed }) => [styles.boxSheetOption, pressed && { opacity: 0.7 }]}
+          onPress={() => {
+            setEditBoxName(box.box_number);
+            setEditBoxError(null);
+            setShowBoxSheet(false);
+            setEditingBox(box);
+          }}>
+          <View style={[styles.boxSheetOptionIcon, { backgroundColor: colors.primarySoft }]}>
+            <Ionicons name="pencil-outline" size={20} color={colors.primary} />
+          </View>
+          <Text style={[font.bodyMedium, { flex: 1 }]}>Rename</Text>
+          <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
+        </Pressable>
+
+        <Pressable
+          style={({ pressed }) => [styles.boxSheetOption, pressed && { opacity: 0.7 }]}
+          onPress={() => {
+            setShowBoxSheet(false);
+            setDeleteConfirmBox(box);
+          }}>
+          <View style={[styles.boxSheetOptionIcon, { backgroundColor: colors.dangerSoft }]}>
+            <Ionicons name="trash-outline" size={20} color={colors.danger} />
+          </View>
+          <Text style={[font.bodyMedium, { flex: 1 }, { color: colors.danger }]}>Delete</Text>
+          <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
+        </Pressable>
+
+        <Pressable
+          style={({ pressed }) => [styles.boxSheetCancel, pressed && { opacity: 0.7 }]}
+          onPress={() => setShowBoxSheet(false)}>
+          <Text style={[font.headline, { color: colors.primary }]}>Cancel</Text>
+        </Pressable>
+      </BottomSheet>
+
+      {/* ── Rename Box Modal ───────────── */}
+      <Modal
+        visible={!!editingBox}
+        transparent
+        animationType="none"
+        onRequestClose={() => {
+          setEditingBox(null);
+          setEditBoxName('');
+          setEditBoxError(null);
+        }}>
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior="padding">
+          <ModalBackdrop
+            visible={!!editingBox}
+            onBackdropPress={() => {
+              setEditingBox(null);
+              setEditBoxName('');
+              setEditBoxError(null);
+            }}>
+            <View style={[styles.modalCard, { backgroundColor: colors.surface }]}>
+              <View style={styles.modalTitleRow}>
+                <View style={styles.modalTitleIcon}>
+                  <Ionicons name="pencil-outline" size={18} color={colors.primary} />
+                </View>
+                <Text style={font.title}>Rename Box</Text>
+              </View>
+
+              {editBoxError ? (
+                <View style={[styles.errorBox, { backgroundColor: colors.dangerSoft }]}>
+                  <Text style={{ fontFamily: fonts.regular, color: colors.danger, fontSize: 13 }}>{editBoxError}</Text>
+                </View>
+              ) : null}
+
+              <TextInput
+                ref={editBoxRef}
+                style={styles.itemInput}
+                placeholder="Box label (e.g. Box 1)"
+                placeholderTextColor={colors.textTertiary}
+                value={editBoxName}
+                onChangeText={(text) => {
+                  setEditBoxName(text);
+                  if (editBoxError) setEditBoxError(null);
+                }}
+                editable={!isEditingBox}
+                returnKeyType="done"
+                onSubmitEditing={handleRenameBox}
+                maxLength={100}
+              />
+
+              <View style={styles.modalActions}>
+                <Pressable
+                  onPress={() => {
+                    setEditingBox(null);
+                    setEditBoxName('');
+                    setEditBoxError(null);
+                  }}
+                  style={({ pressed }) => [styles.modalPillBtn, styles.modalPillBtnGhost, pressed && styles.pressed]}>
+                  <Text style={styles.modalPillGhostText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  onPress={handleRenameBox}
+                  disabled={isEditingBox}
+                  style={({ pressed }) => [
+                    styles.modalPillBtn,
+                    styles.modalPillBtnPrimary,
+                    pressed && styles.pressed,
+                  ]}>
+                  {isEditingBox ? (
+                    <ActivityIndicator color={colors.textInverse} size="small" />
+                  ) : (
+                    <Text style={styles.modalPillPrimaryText}>Save</Text>
+                  )}
+                </Pressable>
+              </View>
+            </View>
+          </ModalBackdrop>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ── Delete Box Confirmation ──────── */}
+      <ConfirmModal
+        visible={!!deleteConfirmBox}
+        title="Delete Box?"
+        message={
+          deleteConfirmBox
+            ? `Are you sure you want to delete "${deleteConfirmBox.box_number}"? All items in this box will also be deleted.${
+                boxPhotoCount > 0 ? ' The photos in this box will also be deleted.' : ''
+              }`
+            : ''
+        }
+        confirmLabel="Delete"
+        confirmDestructive
+        icon="trash-outline"
+        onConfirm={performDeleteBox}
+        onCancel={() => setDeleteConfirmBox(null)}
+        isLoading={isDeletingBox}
+      />
+
+      {/* ── Delete Box Error ─────────────── */}
+      <ConfirmModal
+        visible={deleteBoxErrorVisible}
+        title="Error"
+        message="Failed to delete box. Please try again."
+        confirmLabel="OK"
+        showCancel={false}
+        icon="alert-circle-outline"
+        onConfirm={() => setDeleteBoxErrorVisible(false)}
+        onCancel={() => setDeleteBoxErrorVisible(false)}
+      />
+
+      {/* ── Label Prompt ───────────── */}
       <LabelPromptModal
         visible={showLabelPrompt}
         boxNumber={box?.box_number ?? ''}
@@ -1294,6 +1638,47 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
+
+  // ── Box action sheet (header ⋯) ──
+  // Card rows + ghost cancel, matching components/photo-source-sheet.tsx.
+  boxSheetTitleWrap: {
+    marginHorizontal: -spacing.xl, // stretch the drag surface over the full sheet width
+    paddingHorizontal: spacing.xl,
+    paddingBottom: spacing.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
+  },
+  boxSheetTitle: {
+    textAlign: 'center',
+    marginBottom: spacing.xs,
+  },
+  boxSheetOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
+    borderCurve: 'continuous',
+  },
+  boxSheetOptionIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderCurve: 'continuous',
+  },
+  boxSheetCancel: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: 52,
+    borderRadius: radius.pill,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    borderCurve: 'continuous',
+  },
   centeredContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -1315,31 +1700,70 @@ const styles = StyleSheet.create({
     opacity: 0.7,
   },
 
+  // ── Header accessory — circular white chip matching the back button ──
+  headerAction: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
   // ── Hero Recording Card ─────────────
   heroCard: {
     marginHorizontal: spacing.xl,
     marginBottom: spacing.xxl,
     backgroundColor: colors.surface,
     borderRadius: radius.xl,
-    padding: spacing.xxl,
+    paddingVertical: spacing.xl,
+    paddingHorizontal: spacing.lg,
     alignItems: 'center',
     gap: spacing.md,
     ...shadow.card,
   },
-  heroCardRecording: {
-    backgroundColor: '#2563EB',
-  },
-  heroCardDone: {
-    backgroundColor: '#F0FDF4',
-  },
-  micButton: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    backgroundColor: colors.primary,
+  // Soft yellow halo behind the mic disc: the same "icon" treatment Home gives
+  // its move tiles (moveSoft tile + amber glyph), scaled up.
+  micHalo: {
+    width: 168,
+    height: 168,
+    borderRadius: 84,
+    backgroundColor: colors.moveSoft,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: spacing.xs,
+  },
+  micHaloDisabled: { opacity: 0.6 },
+  heroTitle: {
+    fontFamily: fonts.bold,
+    fontWeight: '700',
+    fontSize: 19,
+    color: colors.textPrimary,
+    textAlign: 'center',
+  },
+  // Recording state goes navy (the app's dark anchor, as on Home's progress
+  // card) with yellow accents — the violet stays for buttons.
+  heroCardRecording: {
+    backgroundColor: colors.navy,
+  },
+  heroCardDone: {
+    backgroundColor: colors.packedSoft,
+  },
+  // Mic disc inside the halo — solid accent yellow (the colour Home reserves
+  // for icon/accent fills), NOT the violet used for buttons.
+  micButton: {
+    width: 116,
+    height: 116,
+    borderRadius: 58,
+    backgroundColor: colors.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: colors.accentDeep,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.35,
+    shadowRadius: 16,
+    elevation: 6,
   },
   micButtonDisabled: {
     backgroundColor: colors.textTertiary,
@@ -1349,18 +1773,11 @@ const styles = StyleSheet.create({
     width: 120,
     height: 120,
     borderRadius: 60,
-    backgroundColor: 'rgba(255,255,255,0.2)',
+    // Same accent disc as the idle state, on the navy recording card.
+    backgroundColor: colors.accent,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: spacing.sm,
-  },
-  voiceHint: {
-    paddingHorizontal: spacing.xl,
-    fontFamily: fonts.regular,
-    fontSize: 13,
-    lineHeight: 19,
-    color: colors.textTertiary,
-    marginBottom: spacing.md,
   },
 
   // ── Example-phrases ticker ──
@@ -1378,12 +1795,25 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: colors.textSecondary,
   },
-  creditsLeft: {
-    marginTop: spacing.xs,
-    fontSize: 13,
-    fontFamily: fonts.medium,
-    fontWeight: '500',
+  // "N recordings left" — soft gray pill at the foot of the hero card.
+  creditsPill: {
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: 8,
+  },
+  creditsPillText: {
+    fontSize: 14,
+    fontFamily: fonts.semiBold,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  sharedCreditsHint: {
+    marginTop: spacing.sm,
+    fontSize: 12,
+    fontFamily: fonts.regular,
     color: colors.textTertiary,
+    textAlign: 'center',
   },
   statusText: {
     marginTop: spacing.lg,
@@ -1396,24 +1826,24 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontFamily: fonts.medium,
     fontWeight: '500',
-    color: '#FFFFFF',
+    color: colors.textInverse,
   },
   recordingTimer: {
     fontSize: 40,
     fontFamily: fonts.bold,
     fontWeight: '700',
-    color: '#FFFFFF',
+    color: colors.textInverse,
     fontVariant: ['tabular-nums'],
   },
   stopButton: {
     marginTop: spacing.sm,
     paddingVertical: spacing.md,
     paddingHorizontal: spacing.xxl,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: colors.surface,
     borderRadius: radius.pill,
   },
   stopButtonText: {
-    color: '#DC2626',
+    color: colors.danger,
     fontSize: 17,
     fontFamily: fonts.bold,
     fontWeight: '700',
@@ -1422,14 +1852,14 @@ const styles = StyleSheet.create({
     marginTop: spacing.sm,
     fontFamily: fonts.regular,
     fontSize: 14,
-    color: '#FFFFFF',
+    color: colors.textInverse,
     textAlign: 'center',
   },
   doneTitle: {
     fontSize: 17,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
-    color: colors.success,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
+    color: colors.packed,
     textAlign: 'center',
   },
   extractedPreview: {
@@ -1495,10 +1925,10 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     paddingHorizontal: spacing.xl,
     backgroundColor: colors.primary,
-    borderRadius: radius.lg,
+    borderRadius: radius.pill,
   },
   tryAgainBtnText: {
-    color: '#FFFFFF',
+    color: colors.textInverse,
     fontSize: 15,
     fontFamily: fonts.semiBold,
     fontWeight: '600',
@@ -1507,42 +1937,42 @@ const styles = StyleSheet.create({
   // ── Items Section ─────────────────────
   itemsSection: {
     paddingHorizontal: spacing.xl,
+    // Clearance for the floating "Add item" pill.
+    paddingBottom: 80,
   },
   itemsLoading: {
     paddingVertical: spacing.xxl,
     alignItems: 'center',
   },
+  // Grouped list of item rows (mockup: one white card per item).
   itemsList: {
     gap: spacing.sm,
-    paddingBottom: 80,
   },
   itemRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    gap: spacing.md,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
     backgroundColor: colors.surface,
-    borderRadius: radius.xl,
-    padding: spacing.lg,
+    borderRadius: radius.lg,
+    borderCurve: 'continuous',
     ...shadow.card,
   },
-  itemRowLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    flex: 1,
-  },
   itemDot: {
-    width: 28,
-    height: 28,
-    borderRadius: 8,
+    width: 40,
+    height: 40,
+    borderRadius: radius.md,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: colors.itemSoft,
+    borderCurve: 'continuous',
   },
   itemName: {
-    fontSize: 15,
+    fontSize: 16,
     color: colors.textPrimary,
-    fontFamily: fonts.medium,
-    fontWeight: '500',
+    fontFamily: fonts.semiBold,
+    fontWeight: '600',
     flex: 1,
   },
   itemActions: {
@@ -1557,25 +1987,34 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
 
-  // ── Empty State ──────────────────────
+  // ── Empty State (dashed card — same language as Home's empty room) ──
   emptyState: {
     alignItems: 'center',
-    paddingVertical: spacing.xxxl,
-    gap: spacing.md,
+    paddingVertical: spacing.xxl,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radius.xl,
+    borderWidth: 1.5,
+    borderStyle: 'dashed',
+    borderColor: colors.dividerStrong,
+    backgroundColor: colors.surfaceMuted,
+    borderCurve: 'continuous',
+    gap: spacing.sm,
   },
   emptyIconContainer: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: colors.surfaceMuted,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    // Icon tile, not a button — same soft-yellow/amber pair as the section
+    // headers (the violet "Add first item" pill below stays a button).
+    backgroundColor: colors.moveSoft,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: spacing.sm,
+    ...shadow.card,
   },
   emptyTitle: {
     fontSize: 18,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
+    fontFamily: fonts.bold,
+    fontWeight: '700',
     color: colors.textPrimary,
   },
   emptyDescription: {
@@ -1585,6 +2024,23 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 20,
   },
+  emptyAddBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginTop: spacing.sm,
+    height: 48,
+    paddingHorizontal: spacing.xl,
+    borderRadius: radius.pill,
+    backgroundColor: colors.primary,
+    borderCurve: 'continuous',
+  },
+  emptyAddText: {
+    color: colors.textInverse,
+    fontSize: 15,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
+  },
   // ── Back button (error state) ────────
   backButton: {
     paddingVertical: spacing.xs,
@@ -1592,35 +2048,51 @@ const styles = StyleSheet.create({
   },
 
   // ── FAB ──────────────────────────────
+  // Labeled pill — same shape as Home's "+ Add box" FAB.
   fab: {
     position: 'absolute',
     bottom: spacing.xxl,
     right: spacing.xl,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    height: 52,
+    minHeight: 52,
+    borderRadius: 26,
     backgroundColor: colors.primary,
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.lg,
     ...shadow.card,
     elevation: 4,
   },
+  fabText: {
+    color: colors.textInverse,
+    fontSize: 15,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
+  },
 
-  // ── Add Item Input ────────────────────
+  // ── Add/Rename Item Input (same treatment as Home's New box field) ──
   itemInput: {
-    backgroundColor: colors.surfaceMuted,
+    backgroundColor: colors.surface,
+    borderWidth: 2,
+    borderColor: colors.primary,
     borderRadius: radius.md,
     paddingHorizontal: spacing.lg,
+    // Height owns the vertical rhythm; zero padding + Android centering keeps
+    // the typed text dead-centre on both platforms.
+    paddingVertical: 0,
+    textAlignVertical: 'center',
     height: 56,
-    fontFamily: fonts.regular,
-    fontSize: 16,
+    fontFamily: fonts.semiBold,
+    fontWeight: '600',
+    fontSize: 17,
     color: colors.textPrimary,
   },
 
   // ── Modal ───────────────────────────
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(20,20,22,0.45)',
+    backgroundColor: colors.scrim,
     justifyContent: 'center',
     paddingHorizontal: spacing.xl,
   },
@@ -1631,30 +2103,51 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     borderCurve: 'continuous',
   },
+  modalTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  modalTitleIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: radius.md,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderCurve: 'continuous',
+  },
   modalActions: {
     flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: spacing.sm,
+    gap: spacing.md,
   },
-  modalCancelBtn: {
-    paddingHorizontal: spacing.lg,
+  modalPillBtn: {
+    flex: 1,
     height: 52,
+    borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
+    borderCurve: 'continuous',
   },
-  modalSaveBtn: {
-    paddingHorizontal: spacing.xxl,
-    height: 52,
-    borderRadius: radius.lg,
-    alignItems: 'center',
-    justifyContent: 'center',
-    minWidth: 60,
+  modalPillBtnGhost: {
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
   },
-  modalSaveText: {
-    color: '#FFFFFF',
+  modalPillBtnPrimary: {
+    backgroundColor: colors.primary,
+  },
+  modalPillGhostText: {
+    color: colors.primary,
     fontSize: 15,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
+    fontFamily: fonts.bold,
+    fontWeight: '700',
+  },
+  modalPillPrimaryText: {
+    color: colors.textInverse,
+    fontSize: 15,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
   },
   errorBox: {
     padding: spacing.sm,
@@ -1708,7 +2201,11 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.surfaceMuted,
     borderRadius: radius.sm,
-    padding: spacing.sm,
+    // Even inset on all four sides — no surrounding height, so the text is
+    // centred by this padding (plus Android's centering).
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    textAlignVertical: 'center',
     fontFamily: fonts.regular,
     fontSize: 16,
     color: colors.textPrimary,
@@ -1722,7 +2219,7 @@ const styles = StyleSheet.create({
     borderRadius: radius.sm,
   },
   reviewAddConfirmText: {
-    color: '#FFFFFF',
+    color: colors.textInverse,
     fontFamily: fonts.semiBold,
     fontWeight: '600',
     fontSize: 14,
@@ -1742,24 +2239,39 @@ const styles = StyleSheet.create({
     gap: spacing.md,
   },
   reviewActionBtn: {
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.lg,
     height: 52,
+    paddingHorizontal: spacing.xxl,
+    borderRadius: radius.pill,
     justifyContent: 'center',
+    alignItems: 'center',
+    borderCurve: 'continuous',
+  },
+  reviewActionCancel: {
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  reviewActionCancelText: {
+    color: colors.primary,
+    fontSize: 15,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
   },
   reviewActionSave: {
     paddingVertical: spacing.sm,
     paddingHorizontal: spacing.xxl,
-    borderRadius: radius.lg,
+    borderRadius: radius.pill,
+    backgroundColor: colors.primary,
     height: 52,
     alignItems: 'center',
     justifyContent: 'center',
     minWidth: 80,
+    borderCurve: 'continuous',
   },
   reviewActionSaveText: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
+    color: colors.textInverse,
+    fontSize: 15,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
   },
 });

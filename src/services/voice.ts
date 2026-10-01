@@ -43,10 +43,14 @@ export type ProcessAudioResponse = ProcessAudioResult | ProcessAudioError;
  *   4. Deletes the temporary local audio file
  *
  * @param audioUri - The local file URI of the recorded audio (.m4a)
+ * @param boxId - The box being packed. The server derives the move from it so
+ *   a shared Pro pool can pay for the recording; without it the recording is
+ *   paid from the caller's own credits.
  * @returns The extracted item names on success, or an error object
  */
 export async function processAudio(
   audioUri: string,
+  boxId?: string,
 ): Promise<ProcessAudioResponse> {
   if (!EDGE_FUNCTION_URL) {
     console.error('Missing EXPO_PUBLIC_SUPABASE_URL environment variable.');
@@ -101,6 +105,7 @@ export async function processAudio(
       body: JSON.stringify({
         audio: base64Audio,
         mimeType: 'audio/m4a',
+        boxId,
       }),
     });
 
@@ -121,9 +126,12 @@ export async function processAudio(
           : 'Unable to process audio. Please try again.';
       return {
         success: false,
-        error: errResult.code === 'OUT_OF_CREDITS'
-          ? 'You are out of AI credits.'
-          : errorMsg,
+        error:
+          errResult.code === 'OUT_OF_CREDITS'
+            ? 'You are out of AI credits.'
+            : errResult.code === 'NOT_A_MEMBER'
+              ? 'You no longer have access to this box.'
+              : errorMsg,
         code: errResult.code,
       };
     }

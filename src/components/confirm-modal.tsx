@@ -181,7 +181,9 @@ export default function ConfirmModal({
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(15,16,36,0.45)',
+    // Navy-tinted scrim (matches textPrimary #171A2E) instead of the old
+    // near-black tint, so modals read as part of the theme.
+    backgroundColor: 'rgba(23,26,46,0.45)',
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: spacing.xxl,
@@ -198,9 +200,10 @@ const styles = StyleSheet.create({
     padding: spacing.xxl,
     alignItems: 'center',
     gap: spacing.md,
+    borderCurve: 'continuous',
 
     // Shadow
-    shadowColor: '#0F1024',
+    shadowColor: '#171A2E',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.12,
     shadowRadius: 16,
@@ -237,26 +240,28 @@ const styles = StyleSheet.create({
   button: {
     flex: 1,
     height: 52,
-    borderRadius: radius.lg,
+    // Pill actions — same shape as every other button in the redesign.
+    borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
+    borderCurve: 'continuous',
   },
   cancelButton: {
     backgroundColor: colors.surfaceMuted,
   },
   cancelButtonText: {
-    fontSize: 16,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
-    color: colors.textSecondary,
+    fontSize: 15,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
+    color: colors.primary,
   },
   confirmButton: {
     minWidth: 80,
   },
   confirmButtonText: {
     color: '#FFFFFF',
-    fontSize: 16,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
+    fontSize: 15,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
   },
 });

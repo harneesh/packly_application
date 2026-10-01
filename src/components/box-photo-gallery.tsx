@@ -26,6 +26,7 @@ import ConfirmModal from '@/components/confirm-modal';
 import PhotoSourceSheet from '@/components/photo-source-sheet';
 import { useAuthStore } from '@/store/auth-store';
 import { useUpgrade } from '@/hooks/use-upgrade';
+import { useMovePlan } from '@/hooks/use-move-plan';
 import {
   MAX_PHOTOS_PER_BOX,
   pickImage,
@@ -39,6 +40,11 @@ import { toFriendlyError } from '@/lib/errors';
 
 interface BoxPhotoGalleryProps {
   boxId: string | null; // null → hidden
+  /**
+   * The move the open box belongs to. Pro is shared per MOVE, so the gate
+   * asks about the move's plan, not this user's subscription.
+   */
+  moveId?: string | null;
   photos: PhotoWithUrl[]; // photos of the open box (parent keeps them fresh)
   onClose: () => void;
   onPhotosChanged: (boxId: string) => void; // after add/replace/delete → parent refetches
@@ -46,6 +52,7 @@ interface BoxPhotoGalleryProps {
 
 export default function BoxPhotoGallery({
   boxId,
+  moveId,
   photos,
   onClose,
   onPhotosChanged,
@@ -56,8 +63,13 @@ export default function BoxPhotoGallery({
 
   // Free-plan users can view/share/delete existing photos; Add and Replace
   // are Pro actions (enforced for real by the DB trigger — this is the UX).
+  // Pro is shared with the move, so what matters is the MOVE's plan: one
+  // member's subscription covers everybody in it. Unknown plan → unlocked,
+  // so a slow network never hides a feature this user has already paid for.
   const { isPro, rcEnabled } = useUpgrade();
-  const locked = rcEnabled && !isPro;
+  const { isMovePro, isLoading: planLoading } = useMovePlan(moveId);
+  const covered = moveId ? isMovePro : isPro;
+  const locked = rcEnabled && !planLoading && !covered;
 
   const [index, setIndex] = useState(0);
   const [showSourceSheet, setShowSourceSheet] = useState(false);
@@ -245,7 +257,7 @@ export default function BoxPhotoGallery({
                 <Ionicons name="chevron-back" size={20} color="#FFFFFF" />
               </Pressable>
               <Text style={styles.counter}>
-                {effectiveIndex + 1} / {photos.length}
+                {effectiveIndex + 1}/{photos.length}
               </Text>
               <View style={styles.topBarSpacer} />
             </View>

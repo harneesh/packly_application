@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import {
   KeyboardAvoidingView,
-  Platform,
   StyleSheet,
   Text,
   View,
@@ -146,20 +145,22 @@ export default function CreateMoveScreen() {
   return (
     <SafeAreaView style={styles.safeArea}>
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        behavior="padding"
         style={styles.container}>
         <ScreenHeader onBack={() => router.back()} />
 
         <View style={styles.body}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-            <Ionicons name="home-outline" size={24} color={colors.primary} />
+          <View style={styles.heroRow}>
+            <View style={styles.heroTile}>
+              <Ionicons name="home-outline" size={22} color={colors.primary} />
+            </View>
             <Text style={font.largeTitle}>Create Move</Text>
           </View>
           <Text style={styles.subtitle}>Give your move a name so you can find it later.</Text>
 
           {error ? (
             <View style={styles.errorBox}>
-              <Text style={{ fontFamily: fonts.regular, color: '#DC2626', fontSize: 14 }}>{error}</Text>
+              <Text style={{ fontFamily: fonts.regular, color: colors.danger, fontSize: 14 }}>{error}</Text>
             </View>
           ) : null}
 
@@ -205,6 +206,20 @@ const styles = StyleSheet.create({
   body: {
     paddingHorizontal: spacing.xl,
     paddingTop: spacing.lg,
+  },
+  heroRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  heroTile: {
+    width: 44,
+    height: 44,
+    borderRadius: radius.md,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderCurve: 'continuous',
   },
   subtitle: {
     color: colors.textSecondary,

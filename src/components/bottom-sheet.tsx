@@ -24,7 +24,7 @@ import {
   type PanResponderInstance,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { colors, spacing } from '../../packly-ui/theme';
+import { colors, spacing, radius } from '../../packly-ui/theme';
 
 /**
  * Context that exposes the sheet's pan responders so child elements can opt
@@ -191,15 +191,16 @@ export default function BottomSheet({
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(20,20,22,0.45)',
+    // Navy-tinted scrim shared by every overlay in the redesign.
+    backgroundColor: 'rgba(23,26,46,0.45)',
     justifyContent: 'flex-end',
   },
   dismissArea: {
     flex: 1,
   },
   sheet: {
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
     borderCurve: 'continuous',
     paddingBottom: spacing.xxl,
     maxHeight: '85%',
@@ -219,6 +220,6 @@ const styles = StyleSheet.create({
     width: 36,
     height: 4,
     borderRadius: 2,
-    backgroundColor: colors.border,
+    backgroundColor: colors.dividerStrong,
   },
 });

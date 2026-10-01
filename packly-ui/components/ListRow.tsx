@@ -8,18 +8,27 @@ import React, { useRef, useCallback } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Animated } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import LeadingIcon, { IconType } from './LeadingIcon';
-import { colors, radius, spacing, font, shadow } from '../theme';
+import StatusPill, { BoxStatus } from './StatusPill';
+import { colors, radius, spacing, font, fonts, shadow } from '../theme';
 
 interface ListRowProps {
   iconType: IconType;
-  iconLabel?: string;
+  iconLabel?: string | null;
   title: string;
   subtitle?: string;
   badge?: string; // small pill under the title, e.g. an invite code
   meta?: string; // right-aligned small text, e.g. "1d ago"
   chevron?: boolean;
   onPress?: () => void;
+  /** Long press — opens the row's action sheet (e.g. rename/delete a box). */
+  onLongPress?: () => void;
   onMenuPress?: () => void; // shows a "..." button when provided
+  /**
+   * Status pill on the right (mockup §1: Packed/Packing/Empty). When
+   * `onStatusPress` is given the pill is tappable (tap = toggle packed).
+   */
+  status?: BoxStatus;
+  onStatusPress?: () => void;
   leadingImage?: string | null; // photo URL shown instead of the icon
   onLeadingPress?: () => void; // makes the leading tile tappable (photo viewer)
   leadingSize?: number; // explicit leading tile size; defaults to LEADING_SIZE (44)
@@ -46,7 +55,10 @@ export default function ListRow({
   meta,
   chevron,
   onPress,
+  onLongPress,
   onMenuPress,
+  status,
+  onStatusPress,
   leadingImage,
   onLeadingPress,
   leadingSize,
@@ -83,6 +95,7 @@ export default function ListRow({
       <TouchableOpacity
         activeOpacity={1}
         onPress={onPress}
+        onLongPress={onLongPress}
         onPressIn={handlePressIn}
         onPressOut={handlePressOut}
         style={leadingFill ? styles.rowInnerFill : styles.rowInner}>
@@ -113,7 +126,10 @@ export default function ListRow({
           ) : null}
         </View>
         {meta ? <Text style={styles.meta}>{meta}</Text> : null}
-        {onMenuPress ? (
+        {status ? (
+          <StatusPill status={status} onPress={onStatusPress} />
+        ) : null}
+        {onMenuPress && !status ? (
           <TouchableOpacity onPress={onMenuPress} hitSlop={8} style={styles.menuBtn}>
             <Ionicons name="ellipsis-horizontal" size={18} color={colors.textTertiary} />
           </TouchableOpacity>
@@ -172,5 +188,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.sm,
     paddingVertical: 2,
   },
-  badgeText: { fontSize: 12, fontWeight: '600', color: colors.textSecondary, letterSpacing: 0.3 },
+  badgeText: {
+    fontSize: 12,
+    fontFamily: fonts.semiBold,
+    fontWeight: '600',
+    color: colors.textSecondary,
+    letterSpacing: 0.3,
+  },
 });

@@ -108,7 +108,7 @@ export default function LabelPromptModal({
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(20,20,22,0.5)',
+    backgroundColor: 'rgba(23,26,46,0.5)',
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: spacing.xl,
@@ -162,8 +162,9 @@ const styles = StyleSheet.create({
   // ── Text ──────────────────────────────
   title: {
     fontSize: 22,
-    fontFamily: fonts.bold,
-    fontWeight: '700',
+    fontFamily: fonts.extraBold,
+    fontWeight: '800',
+    letterSpacing: -0.3,
     color: colors.textPrimary,
     textAlign: 'center',
   },
@@ -186,12 +187,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.sm,
     backgroundColor: colors.primary,
-    borderRadius: radius.lg,
+    borderRadius: radius.pill,
     paddingVertical: spacing.md,
     paddingHorizontal: spacing.xxl,
     width: '100%',
     justifyContent: 'center',
     height: 52,
+    borderCurve: 'continuous',
   },
   primaryText: {
     color: '#FFFFFF',

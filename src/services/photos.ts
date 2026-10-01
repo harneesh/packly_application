@@ -350,6 +350,43 @@ async function attachSignedUrls(photos: BoxPhoto[]): Promise<PhotoWithUrl[]> {
   return result;
 }
 
+/**
+ * Resolve storage paths to short-lived signed URLs, reusing the same in-memory
+ * cache as the galleries (so repeat searches cost zero network calls).
+ *
+ * Used by search results: the search RPC can only return photo *storage
+ * paths* because the bucket is private — a path is never a usable URL.
+ * Missing/dead paths are simply absent from the result (no pruning here).
+ */
+export async function signPhotoPaths(paths: string[]): Promise<Record<string, string>> {
+  const unique = [...new Set(paths.filter((p): p is string => !!p))];
+  if (unique.length === 0) return {};
+
+  const urlByPath: Record<string, string> = {};
+  const needSigning: string[] = [];
+  for (const path of unique) {
+    const cached = getCachedUrl(path);
+    if (cached) urlByPath[path] = cached;
+    else needSigning.push(path);
+  }
+
+  if (needSigning.length > 0) {
+    const { data, error } = await supabase.storage
+      .from(PHOTO_BUCKET)
+      .createSignedUrls(needSigning, SIGNED_URL_TTL);
+    if (error) throw new Error(error.message);
+
+    for (const item of data ?? []) {
+      if (item.signedUrl && item.path) {
+        urlByPath[item.path] = item.signedUrl;
+        setCachedUrl(item.path, item.signedUrl);
+      }
+    }
+  }
+
+  return urlByPath;
+}
+
 /** Fetch photo records for a box and attach fresh signed URLs. */
 export async function fetchPhotos(boxId: string): Promise<PhotoWithUrl[]> {
   const t0 = performance.now();

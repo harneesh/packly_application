@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -11,9 +10,10 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import { useAuthStore } from '@/store/auth-store';
 import { Link } from 'expo-router';
-import { colors, spacing, radius, font, fonts } from '../../../packly-ui/theme';
+import { colors, spacing, radius, font, fonts, shadow } from '../../../packly-ui/theme';
 
 export default function SignUpScreen() {
   const [name, setName] = useState('');
@@ -43,8 +43,8 @@ export default function SignUpScreen() {
       <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
         <View style={styles.successContainer}>
           <Text style={font.largeTitle}>Check Your Email</Text>
-          <View style={[styles.successBox, { backgroundColor: '#DCFCE7' }]}>
-            <Text style={{ color: '#16A34A', textAlign: 'center' }}>
+          <View style={[styles.successBox, { backgroundColor: colors.packedSoft }]}>
+            <Text style={{ color: colors.packed, textAlign: 'center', fontFamily: fonts.medium }}>
               Account created! We've sent a confirmation link to your email. Please verify your
               email address before signing in.
             </Text>
@@ -65,10 +65,13 @@ export default function SignUpScreen() {
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        behavior="padding"
         style={styles.container}
       >
         <View style={styles.header}>
+          <View style={styles.logoTile}>
+            <Ionicons name="cube" size={30} color="#FFFFFF" />
+          </View>
           <Text style={font.largeTitle}>Create Account</Text>
           <Text style={[font.body, { color: colors.textSecondary }]}>
             Sign up to start packing with Packly
@@ -168,40 +171,58 @@ const styles = StyleSheet.create({
     marginBottom: spacing.xxxl,
     gap: spacing.sm,
   },
+  // Brand mark — same indigo tile as Sign In.
+  logoTile: {
+    width: 64,
+    height: 64,
+    borderRadius: radius.lg,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.sm,
+    borderCurve: 'continuous',
+    ...shadow.card,
+  },
   form: {
     gap: spacing.md,
     marginBottom: spacing.xxxl,
   },
   label: {
-    fontSize: 14,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
+    fontSize: 13,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
     color: colors.textPrimary,
   },
+  // White fields with a hairline border — same field language as TextField.
   input: {
-    backgroundColor: colors.surfaceMuted,
-    borderRadius: radius.md,
-    borderWidth: 1,
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1.5,
     borderColor: colors.border,
     paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+    // Fixed height + zero vertical padding + Android centering (see sign-in).
+    paddingVertical: 0,
+    textAlignVertical: 'center',
     fontFamily: fonts.regular,
     fontSize: 16,
     color: colors.textPrimary,
     height: 52,
+    borderCurve: 'continuous',
   },
   button: {
     height: 52,
-    borderRadius: radius.lg,
+    borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: spacing.sm,
+    borderCurve: 'continuous',
+    ...shadow.card,
   },
   buttonText: {
     color: '#FFFFFF',
     fontSize: 16,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
+    fontFamily: fonts.bold,
+    fontWeight: '700',
   },
   errorBox: {
     padding: spacing.md,
@@ -222,5 +243,6 @@ const styles = StyleSheet.create({
   successBox: {
     padding: spacing.xxl,
     borderRadius: radius.lg,
+    borderCurve: 'continuous',
   },
 });

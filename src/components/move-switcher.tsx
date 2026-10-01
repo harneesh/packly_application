@@ -12,14 +12,14 @@ import {
   TextInput,
   View,
   ScrollView,
-  Platform,
 } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
-import { colors, spacing, font, fonts } from '../../packly-ui/theme';
+import { colors, spacing, font, fonts, radius } from '../../packly-ui/theme';
 import { supabase } from '@/services/supabase';
 import { deleteStorageForBoxIds } from '@/services/photos';
+import { fetchJoinRequests } from '@/services/members';
 import { useAuthStore } from '@/store/auth-store';
 import { useActiveMoveStore } from '@/store/active-move-store';
 import ConfirmModal from '@/components/confirm-modal';
@@ -44,15 +44,23 @@ interface MoveSwitcherProps {
 // ──────────────────────────────────────────
 
 async function fetchUserMoves(userId: string): Promise<Move[]> {
-  // Get all move IDs the user is a member of
-  const { data: memberships, error: memberError } = await supabase
-    .from('move_members')
-    .select('move_id')
-    .eq('user_id', userId);
+  // Membership means "row in move_members OR owner" — the same rule the
+  // database uses (is_move_member_for). Asking only for member rows hides a
+  // move from its own owner whenever that row is missing, so ask for both.
+  const [memberships, owned] = await Promise.all([
+    supabase.from('move_members').select('move_id').eq('user_id', userId),
+    supabase.from('moves').select('id').eq('owner_id', userId),
+  ]);
 
-  if (memberError) throw new Error(memberError.message);
+  if (memberships.error) throw new Error(memberships.error.message);
+  if (owned.error) throw new Error(owned.error.message);
 
-  const moveIds = (memberships ?? []).map((m) => m.move_id);
+  const moveIds = [
+    ...new Set([
+      ...(memberships.data ?? []).map((m) => m.move_id),
+      ...(owned.data ?? []).map((m) => m.id),
+    ]),
+  ];
   if (moveIds.length === 0) return [];
 
   // Fetch the actual moves
@@ -118,6 +126,32 @@ export default function MoveSwitcher({
   const queryClient = useQueryClient();
   const { setActiveMove } = useActiveMoveStore();
 
+  // ── Waiting join requests, for the moves this user owns ──
+  //
+  // Only an owner can see requests at all (the RPC returns an empty list to
+  // everyone else), and the sheet is opened rarely, so a few small calls are
+  // cheaper than a new aggregate RPC. Keyed by the owned ids so the answer is
+  // shared across the whole sheet instead of one query per row.
+  const ownedMoveIds = (moves ?? [])
+    .filter((m) => m.owner_id === user?.id)
+    .map((m) => m.id);
+
+  const { data: requestCounts } = useQuery({
+    queryKey: ['join-request-counts', ownedMoveIds.join(',')],
+    enabled: visible && ownedMoveIds.length > 0,
+    // No staleTime: this badge only says "somebody is waiting", so a cached
+    // count is worse than a refetch. It runs only while the sheet is open.
+    queryFn: async () => {
+      const counts = await Promise.all(
+        ownedMoveIds.map(async (moveId) => {
+          const requests = await fetchJoinRequests(moveId);
+          return [moveId, requests.length] as const;
+        }),
+      );
+      return Object.fromEntries(counts) as Record<string, number>;
+    },
+  });
+
   // Determine if current user is the owner of the current move
   const currentMove = moves?.find((m) => m.id === currentMoveId);
 
@@ -161,6 +195,20 @@ export default function MoveSwitcher({
     setTimeout(() => setJustCopied(false), 2000);
   }, [currentMove, copyScale]);
 
+  /**
+   * Open a move's own screen: members, the waiting-request queue, the invite
+   * code ticket, and the Pro sharing switch. Nothing else in the app links to
+   * it, so this list is the entry point — and the owner's "N waiting" pill is
+   * the shortcut to the approval it is announcing.
+   */
+  const openMove = useCallback(
+    (moveId: string) => {
+      onClose();
+      router.push({ pathname: '/move/[id]', params: { id: moveId } });
+    },
+    [onClose],
+  );
+
   // ── Custom confirm/error modal state ──
   const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
@@ -169,6 +217,12 @@ export default function MoveSwitcher({
 
   // Get the move name for the delete confirmation
   const deleteTargetName = moves?.find((m) => m.id === deleteTargetId)?.name ?? '';
+
+  // ── Leave move state (members only — an owner cannot leave their own move) ──
+  const canLeaveCurrent = !!currentMove && !!user && currentMove.owner_id !== user.id;
+  const [leaveConfirmVisible, setLeaveConfirmVisible] = useState(false);
+  const [leaveErrorVisible, setLeaveErrorVisible] = useState(false);
+  const [isLeaving, setIsLeaving] = useState(false);
 
   // ── Rename move handler ──
   const handleRenameMove = useCallback(async () => {
@@ -251,6 +305,47 @@ export default function MoveSwitcher({
     }
   }, [deleteTargetId, currentMoveId, setActiveMove, queryClient, user, onClose]);
 
+  // Same flow as "Leave this move" on the move screen. Leaving removes access,
+  // never data — everything the person packed stays in the move.
+  const performLeave = useCallback(async () => {
+    if (!currentMove || !user || currentMove.owner_id === user.id) return;
+    const leftMoveId = currentMove.id;
+    setIsLeaving(true);
+    const previousActiveMoveId = useActiveMoveStore.getState().activeMoveId;
+    try {
+      // Cleared BEFORE the delete so Home's realtime removal notice does not
+      // mistake a self-service leave for the owner removing this user.
+      await setActiveMove(null);
+
+      const { error } = await supabase
+        .from('move_members')
+        .delete()
+        .eq('move_id', leftMoveId)
+        .eq('user_id', user.id);
+      if (error) throw new Error(error.message);
+
+      setLeaveConfirmVisible(false);
+      onClose();
+
+      // Drop it from the persisted list right away, or Home's fallback could
+      // land back on the move just left until the refetch arrives.
+      queryClient.setQueryData<Move[]>(['userMoves', user.id], (prev) =>
+        prev ? prev.filter((m) => m.id !== leftMoveId) : prev,
+      );
+      queryClient.invalidateQueries({ queryKey: ['userMoves', user.id] });
+      queryClient.invalidateQueries({ queryKey: ['moves', user.id] });
+      queryClient.invalidateQueries({ queryKey: ['members', leftMoveId] });
+      queryClient.invalidateQueries({ queryKey: ['homeRooms'] });
+      queryClient.invalidateQueries({ queryKey: ['join-request-counts'] });
+    } catch {
+      await setActiveMove(previousActiveMoveId);
+      setLeaveConfirmVisible(false);
+      setLeaveErrorVisible(true);
+    } finally {
+      setIsLeaving(false);
+    }
+  }, [currentMove, user, setActiveMove, queryClient, onClose]);
+
   return (
     <BottomSheet
       visible={visible}
@@ -258,7 +353,7 @@ export default function MoveSwitcher({
       handleOnly
       sheetStyle={{ backgroundColor: colors.surface, maxHeight: '80%' }}>
       <BottomSheetDraggableArea>
-        <Text style={[font.headline, styles.sheetTitle]}>Switch Move</Text>
+        <Text style={[font.title, styles.sheetTitle]}>Your moves</Text>
       </BottomSheetDraggableArea>
 
           {/* ── Move List ─────────────────── */}
@@ -295,25 +390,43 @@ export default function MoveSwitcher({
                         }
                       }}>
                       <View style={styles.moveRowLeft}>
-                        <View style={[styles.moveIcon, { backgroundColor: isActive ? colors.primary + '15' : colors.surfaceMuted }]}>
+                        <View style={styles.moveIcon}>
                           <Ionicons
-                            name="home-outline"
+                            name="home"
                             size={18}
-                            color={isActive ? colors.primary : colors.textSecondary}
+                            color={colors.accentDeep}
                           />
                         </View>
                         <View style={styles.moveRowInfo}>
                           <Text
                             style={[
-                              font.body,
-                              { fontWeight: isActive ? '600' : '400' },
+                              font.bodyMedium,
+                              styles.moveRowName,
+                              !isActive && { fontFamily: fonts.regular, fontWeight: '400' as const },
                             ]}
                             numberOfLines={1}>
                             {move.name}
                           </Text>
-                          <Text style={styles.moveRowMeta}>
-                            {timeAgo(move.created_at)}
-                          </Text>
+                          <View style={styles.moveRowMetaRow}>
+                            <Text style={styles.moveRowMeta}>
+                              Created {timeAgo(move.created_at)}
+                            </Text>
+                            {isMoveOwner && (requestCounts?.[move.id] ?? 0) > 0 ? (
+                              <Pressable
+                                hitSlop={6}
+                                onPress={() => openMove(move.id)}
+                                style={({ pressed }) => [styles.waitingPill, pressed && { opacity: 0.7 }]}>
+                                <Ionicons
+                                  name="person-add-outline"
+                                  size={11}
+                                  color={colors.navyDeep}
+                                />
+                                <Text style={styles.waitingPillText}>
+                                  {requestCounts?.[move.id]} waiting
+                                </Text>
+                              </Pressable>
+                            ) : null}
+                          </View>
                         </View>
                       </View>
                       {isActive && (
@@ -323,6 +436,19 @@ export default function MoveSwitcher({
                           color={colors.primary}
                         />
                       )}
+                      <Pressable
+                        hitSlop={6}
+                        onPress={() => openMove(move.id)}
+                        style={({ pressed }) => [
+                          styles.openMoveBtn,
+                          pressed && { opacity: 0.6 },
+                        ]}>
+                        <Ionicons
+                          name="chevron-forward"
+                          size={16}
+                          color={colors.textSecondary}
+                        />
+                      </Pressable>
                     </Pressable>
                     {isExpanded && isMoveOwner && (
                       <Animated.View style={[styles.expandActions, {
@@ -362,13 +488,10 @@ export default function MoveSwitcher({
             </Text>
           )}
 
-          {/* ── Invite Code ────────────────── */}
+          {/* ── Invite Code (mockup §2 dashed ticket) ── */}
           {currentMove && currentMove.invite_code ? (
-            <View style={[styles.inviteSection, { borderTopColor: colors.border }]}>
-              <View style={styles.inviteHeader}>
-                <Ionicons name="people-outline" size={16} color={colors.textSecondary} />
-                <Text style={styles.inviteLabel}>Invite Code</Text>
-              </View>
+            <View style={styles.inviteSection}>
+              <Text style={styles.inviteLabel}>Invite code</Text>
               <View style={styles.inviteCodeRow}>
                 <Text style={styles.inviteCode} selectable>
                   {currentMove.invite_code}
@@ -378,23 +501,17 @@ export default function MoveSwitcher({
                     style={({ pressed }) => [
                       styles.inviteCopyBtn,
                       {
-                        backgroundColor: justCopied ? colors.success + '18' : colors.primary,
-                        borderColor: justCopied ? colors.success : 'transparent',
-                        borderWidth: justCopied ? 1.5 : 0,
+                        backgroundColor: justCopied ? colors.success : colors.primary,
                       },
                       pressed && !justCopied && { opacity: 0.8 },
                     ]}
                     onPress={handleCopyInvite}>
                     <Ionicons
-                      name={justCopied ? 'checkmark-circle' : 'copy-outline'}
+                      name={justCopied ? 'checkmark' : 'copy-outline'}
                       size={16}
-                      color={justCopied ? colors.success : '#FFFFFF'}
+                      color="#FFFFFF"
                     />
-                    <Text
-                      style={[
-                        styles.inviteCopyText,
-                        { color: justCopied ? colors.success : '#FFFFFF' },
-                      ]}>
+                    <Text style={styles.inviteCopyText}>
                       {justCopied ? 'Copied!' : 'Copy'}
                     </Text>
                   </Pressable>
@@ -403,35 +520,34 @@ export default function MoveSwitcher({
             </View>
           ) : null}
 
-          {/* ── Actions ───────────────────── */}
-          <View style={[styles.actionsSection, { borderTopColor: colors.border }]}>
+          {/* ── Actions (mockup §2 side-by-side pills) ── */}
+          <View style={styles.actionsSection}>
             {/* Create Move */}
             <Pressable
-              style={({ pressed }) => [styles.actionRow, pressed && styles.actionPressed]}
+              style={({ pressed }) => [styles.actionPill, pressed && styles.actionPressed]}
               onPress={handleCreateMove}>
-              <Ionicons name="add-circle-outline" size={20} color={colors.primary} />
-              <Text style={[styles.actionText, { color: colors.primary }]}>Create Move</Text>
+              <Ionicons name="add" size={18} color={colors.primary} />
+              <Text style={styles.actionPillText}>New move</Text>
             </Pressable>
 
             {/* Join Move */}
             <Pressable
-              style={({ pressed }) => [styles.actionRow, pressed && styles.actionPressed]}
+              style={({ pressed }) => [styles.actionPill, pressed && styles.actionPressed]}
               onPress={handleJoinMove}>
-              <Ionicons name="enter-outline" size={20} color={colors.primary} />
-              <Text style={[styles.actionText, { color: colors.primary }]}>Join Move</Text>
+              <Text style={styles.actionPillText}>Join a move</Text>
             </Pressable>
 
             {/* Delete Move moved inline inside each move row */}
           </View>
 
-          {/* ── Cancel ────────────────────── */}
-          <View style={[styles.cancelSection, { backgroundColor: colors.surfaceMuted }]}>
+          {canLeaveCurrent ? (
             <Pressable
-              style={({ pressed }) => [styles.cancelRow, pressed && { opacity: 0.7 }]}
-              onPress={onClose}>
-              <Text style={styles.cancelText}>Cancel</Text>
+              style={({ pressed }) => [styles.leaveMoveBtn, pressed && styles.actionPressed]}
+              onPress={() => setLeaveConfirmVisible(true)}>
+              <Ionicons name="log-out-outline" size={18} color={colors.danger} />
+              <Text style={styles.leaveMoveText}>Leave this move</Text>
             </Pressable>
-          </View>
+          ) : null}
 
       {/* ── Rename Move Modal ──────────── */}
       <Modal
@@ -445,7 +561,7 @@ export default function MoveSwitcher({
         }}>
         <KeyboardAvoidingView
           style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          behavior="padding">
           <ModalBackdrop
             visible={!!renameMove}
             onBackdropPress={() => {
@@ -454,11 +570,16 @@ export default function MoveSwitcher({
               setRenameMoveError(null);
             }}>
             <View style={[styles.modalCard, { backgroundColor: colors.surface }]}>
-              <Text style={[font.headline, { marginBottom: spacing.sm }]}>Rename Move</Text>
+              <View style={styles.modalTitleRow}>
+                <View style={styles.modalTitleIcon}>
+                  <Ionicons name="pencil-outline" size={18} color={colors.primary} />
+                </View>
+                <Text style={font.title}>Rename Move</Text>
+              </View>
 
               {renameMoveError ? (
-                <View style={[styles.errorBox, { backgroundColor: '#FEE2E2' }]}>
-                  <Text style={{ fontFamily: fonts.regular, color: '#DC2626', fontSize: 13 }}>{renameMoveError}</Text>
+                <View style={[styles.errorBox, { backgroundColor: colors.dangerSoft }]}>
+                  <Text style={{ fontFamily: fonts.regular, color: colors.danger, fontSize: 13 }}>{renameMoveError}</Text>
                 </View>
               ) : null}
 
@@ -484,20 +605,21 @@ export default function MoveSwitcher({
                     setRenameMoveName('');
                     setRenameMoveError(null);
                   }}
-                  style={({ pressed }) => [styles.modalCancelBtn, pressed && { opacity: 0.7 }]}>
-                  <Text style={{ fontFamily: fonts.regular, color: colors.textSecondary, fontSize: 15 }}>Cancel</Text>
+                  style={({ pressed }) => [styles.modalPillBtn, styles.modalPillBtnGhost, pressed && { opacity: 0.7 }]}>
+                  <Text style={styles.modalPillGhostText}>Cancel</Text>
                 </Pressable>
                 <Pressable
                   onPress={handleRenameMove}
                   disabled={isRenamingMove}
                   style={({ pressed }) => [
-                    styles.modalSaveBtn,
-                    { backgroundColor: colors.primary, opacity: isRenamingMove || pressed ? 0.7 : 1 },
+                    styles.modalPillBtn,
+                    styles.modalPillBtnPrimary,
+                    pressed && { opacity: 0.85 },
                   ]}>
                   {isRenamingMove ? (
                     <ActivityIndicator color="#FFFFFF" size="small" />
                   ) : (
-                    <Text style={styles.modalSaveText}>Save</Text>
+                    <Text style={styles.modalPillPrimaryText}>Save</Text>
                   )}
                 </Pressable>
               </View>
@@ -533,6 +655,31 @@ export default function MoveSwitcher({
         onConfirm={() => setDeleteErrorVisible(false)}
         onCancel={() => setDeleteErrorVisible(false)}
       />
+
+      {/* ── Leave Confirmation ──────────── */}
+      <ConfirmModal
+        visible={leaveConfirmVisible}
+        title="Leave this move?"
+        message={`You lose access to "${currentMove?.name ?? 'this move'}" right away. Everything you packed stays in the move, and you can join again later with the invite code.`}
+        confirmLabel="Leave"
+        confirmDestructive
+        icon="log-out-outline"
+        isLoading={isLeaving}
+        onConfirm={performLeave}
+        onCancel={() => setLeaveConfirmVisible(false)}
+      />
+
+      {/* ── Leave Error ─────────────────── */}
+      <ConfirmModal
+        visible={leaveErrorVisible}
+        title="Error"
+        message="Failed to leave the move. Please try again."
+        confirmLabel="OK"
+        showCancel={false}
+        icon="alert-circle-outline"
+        onConfirm={() => setLeaveErrorVisible(false)}
+        onCancel={() => setLeaveErrorVisible(false)}
+      />
     </BottomSheet>
   );
 }
@@ -543,8 +690,10 @@ export default function MoveSwitcher({
 
 const styles = StyleSheet.create({
   sheetTitle: {
-    textAlign: 'center',
-    paddingBottom: spacing.lg,
+    textAlign: 'left',
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.md,
   },
 
   // ── List ──────────────────────────
@@ -562,12 +711,12 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingVertical: spacing.md,
     paddingHorizontal: spacing.md,
-    borderRadius: 12,
+    borderRadius: radius.lg,
     marginBottom: 4,
     borderCurve: 'continuous',
   },
   moveRowActive: {
-    backgroundColor: colors.primary + '0A',
+    backgroundColor: colors.primarySoft,
   },
   moveRowPressed: {
     opacity: 0.7,
@@ -579,12 +728,15 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   moveIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.moveSoft,
     alignItems: 'center',
     justifyContent: 'center',
-    borderCurve: 'continuous',
+  },
+  moveRowName: {
+    fontSize: 16,
   },
   moveRowInfo: {
     flex: 1,
@@ -594,6 +746,38 @@ const styles = StyleSheet.create({
     fontFamily: fonts.regular,
     fontSize: 12,
     color: colors.textTertiary,
+  },
+  moveRowMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  waitingPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: colors.accent,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  waitingPillText: {
+    color: colors.navyDeep,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
+    fontSize: 11,
+  },
+  // Opens the move's own screen — the only entry point that exists for it.
+  openMoveBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginLeft: spacing.sm,
   },
   noMovesText: {
     textAlign: 'center',
@@ -613,20 +797,23 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.xl,
     paddingBottom: spacing.md,
   },
+  // Ghost pills (mockup §2) — Rename/Delete under the expanded move row.
   expandActionBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.xs,
     paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.md,
-    borderRadius: 10,
-    backgroundColor: colors.surfaceMuted,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surface,
+    borderWidth: 1.5,
+    borderColor: colors.border,
     borderCurve: 'continuous',
   },
   expandActionText: {
     fontSize: 14,
-    fontFamily: fonts.medium,
-    fontWeight: '500',
+    fontFamily: fonts.bold,
+    fontWeight: '700',
     color: colors.primary,
   },
   expandDivider: {
@@ -646,77 +833,98 @@ const styles = StyleSheet.create({
     padding: spacing.sm,
     borderRadius: 8,
   },
+  modalTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  modalTitleIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: radius.md,
+    backgroundColor: colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderCurve: 'continuous',
+  },
   modalActions: {
     flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: spacing.sm,
+    gap: spacing.md,
   },
-  modalCancelBtn: {
-    paddingHorizontal: spacing.lg,
+  modalPillBtn: {
+    flex: 1,
     height: 52,
+    borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
+    borderCurve: 'continuous',
   },
-  modalSaveBtn: {
-    paddingHorizontal: spacing.xxl,
-    height: 52,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    minWidth: 60,
+  modalPillBtnGhost: {
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
   },
-  modalSaveText: {
+  modalPillBtnPrimary: {
+    backgroundColor: colors.primary,
+  },
+  modalPillGhostText: {
+    color: colors.primary,
+    fontSize: 15,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
+  },
+  modalPillPrimaryText: {
     color: '#FFFFFF',
     fontSize: 15,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
+    fontFamily: fonts.bold,
+    fontWeight: '700',
   },
   moveNameInput: {
-    backgroundColor: colors.surfaceMuted,
-    borderRadius: 12,
+    backgroundColor: colors.surface,
+    borderWidth: 2,
+    borderColor: colors.primary,
+    borderRadius: radius.md,
     paddingHorizontal: spacing.lg,
+    // Height owns the vertical rhythm; zero padding + Android centering keeps
+    // the typed text dead-centre on both platforms.
+    paddingVertical: 0,
+    textAlignVertical: 'center',
     height: 56,
-    fontFamily: fonts.regular,
-    fontSize: 16,
+    fontFamily: fonts.semiBold,
+    fontWeight: '600',
+    fontSize: 17,
     color: colors.textPrimary,
   },
 
   // ── Invite Code ──────────────────
   inviteSection: {
-    borderTopWidth: 0.5,
-    paddingTop: spacing.lg,
     paddingHorizontal: spacing.xl,
-    marginTop: spacing.sm,
-  },
-  inviteHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-    marginBottom: spacing.sm,
+    marginTop: spacing.md,
   },
   inviteLabel: {
     fontSize: 13,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
+    fontFamily: fonts.regular,
     color: colors.textSecondary,
-    letterSpacing: 0.3,
+    marginBottom: spacing.sm,
   },
   inviteCodeRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: colors.surfaceMuted,
-    borderRadius: 12,
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1.5,
+    borderStyle: 'dashed',
+    borderColor: colors.primary,
     paddingLeft: spacing.lg,
     paddingRight: spacing.sm,
-    height: 52,
-    borderCurve: 'continuous',
+    paddingVertical: spacing.md,
   },
   inviteCode: {
-    fontSize: 18,
-    fontFamily: fonts.bold,
-    fontWeight: '700',
-    letterSpacing: 1,
+    fontSize: 26,
+    fontFamily: fonts.extraBold,
+    fontWeight: '800',
+    letterSpacing: 2,
     color: colors.textPrimary,
     fontVariant: ['tabular-nums'],
   },
@@ -725,9 +933,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 6,
     paddingHorizontal: spacing.lg,
-    height: 38,
-    borderRadius: 10,
-    borderCurve: 'continuous',
+    height: 42,
+    borderRadius: radius.pill,
   },
   inviteCopyText: {
     fontSize: 14,
@@ -738,47 +945,51 @@ const styles = StyleSheet.create({
 
   // ── Actions ───────────────────────
   actionsSection: {
-    borderTopWidth: 0.5,
-    paddingTop: spacing.sm,
+    flexDirection: 'row',
+    gap: spacing.md,
     paddingHorizontal: spacing.xl,
-    marginTop: spacing.sm,
+    marginTop: spacing.lg,
   },
-  actionRow: {
+  actionPill: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.md,
-    paddingVertical: spacing.md,
-    borderRadius: 12,
-    paddingHorizontal: spacing.md,
-    borderCurve: 'continuous',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 14,
+    borderRadius: radius.pill,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
   },
   actionPressed: {
     opacity: 0.6,
   },
-  actionText: {
-    fontSize: 16,
-    fontFamily: fonts.medium,
-    fontWeight: '500',
-    color: colors.textPrimary,
+  actionPillText: {
+    fontSize: 15,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
+    color: colors.primary,
   },
 
-  // ── Cancel ────────────────────────
-  cancelSection: {
-    marginHorizontal: spacing.xl,
+  // ── Leave ──────────────────────────
+  leaveMoveBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
     marginTop: spacing.md,
-    borderRadius: 14,
-    overflow: 'hidden',
+    marginHorizontal: spacing.xl,
+    paddingVertical: 14,
+    borderRadius: radius.pill,
+    backgroundColor: colors.dangerSoft,
     borderCurve: 'continuous',
   },
-  cancelRow: {
-    paddingVertical: spacing.lg,
-    alignItems: 'center',
-  },
-  cancelText: {
-    fontSize: 17,
-    fontFamily: fonts.semiBold,
-    fontWeight: '600',
-    color: colors.primary,
+  leaveMoveText: {
+    fontFamily: fonts.bold,
+    fontWeight: '700',
+    fontSize: 15,
+    color: colors.danger,
   },
 
   // ── Delete ─────────────────────────

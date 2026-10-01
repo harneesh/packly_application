@@ -29,6 +29,7 @@ import SectionHeader from '../../packly-ui/components/SectionHeader';
 import PhotoSourceSheet from '@/components/photo-source-sheet';
 import BoxPhotoGallery from '@/components/box-photo-gallery';
 import { useUpgrade } from '@/hooks/use-upgrade';
+import { useMovePlan } from '@/hooks/use-move-plan';
 import { useAuthStore } from '@/store/auth-store';
 import {
   MAX_PHOTOS_PER_BOX,
@@ -43,6 +44,11 @@ import { toFriendlyError } from '@/lib/errors';
 
 interface BoxPhotosProps {
   boxId: string;
+  /**
+   * The move this box belongs to. Pro is shared per MOVE, so the photo gate
+   * asks about the move's plan, not this user's subscription.
+   */
+  moveId?: string | null;
   onPhotosChanged?: (boxId: string) => void;
 }
 
@@ -51,16 +57,24 @@ type PhotoEntry =
   | (PhotoWithUrl & { status?: 'completed' })
   | { entryId: string; url: string; status: 'uploading' | 'failed' };
 
-export default function BoxPhotos({ boxId }: BoxPhotosProps) {
+export default function BoxPhotos({ boxId, moveId }: BoxPhotosProps) {
   const user = useAuthStore((s) => s.user);
   const queryClient = useQueryClient();
   const { width: screenWidth } = useWindowDimensions();
 
   // Photo gating: the UI lock is an upsell affordance — the REAL gate is the
-  // database trigger (migration 013). Existing photos stay visible for free
+  // database trigger. Photos are a Pro feature, and Pro is shared with the
+  // move: any member's live subscription covering it unlocks photos for
+  // everyone, the plan owner included. Existing photos stay visible for free
   // users (e.g. after a downgrade); only Add/Replace are Pro actions.
+  //
+  // While the move's plan is still loading we do NOT lock: hiding a paid
+  // feature behind a spinner is worse than letting the server be the judge,
+  // and it answers with a friendly "Photos need Pro" if it really is Free.
   const { isPro, rcEnabled } = useUpgrade();
-  const locked = rcEnabled && !isPro;
+  const { isMovePro, isLoading: planLoading } = useMovePlan(moveId);
+  const covered = moveId ? isMovePro : isPro;
+  const locked = rcEnabled && !planLoading && !covered;
 
   const {
     data: photos,
@@ -267,12 +281,12 @@ export default function BoxPhotos({ boxId }: BoxPhotosProps) {
                 <Image source={{ uri: item.url }} style={styles.tileImage} resizeMode="cover" />
                 {isUploading && (
                   <View style={styles.tileOverlay}>
-                    <ActivityIndicator size="small" color="#FFFFFF" />
+                    <ActivityIndicator size="small" color={colors.textInverse} />
                   </View>
                 )}
                 {isFailed && (
                   <View style={styles.tileOverlay}>
-                    <Ionicons name="refresh" size={22} color="#FFFFFF" />
+                    <Ionicons name="refresh" size={22} color={colors.textInverse} />
                     <Text style={styles.tileOverlayText}>Retry</Text>
                   </View>
                 )}
@@ -312,6 +326,7 @@ export default function BoxPhotos({ boxId }: BoxPhotosProps) {
       {/* ── Shared full-screen gallery (same as Home / Room box lists) ── */}
       <BoxPhotoGallery
         boxId={galleryOpen ? boxId : null}
+        moveId={moveId}
         photos={completedPhotos}
         onClose={() => setGalleryOpen(false)}
         onPhotosChanged={invalidate}
@@ -399,13 +414,13 @@ const styles = StyleSheet.create({
   },
   tileOverlay: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: colors.scrim,
     alignItems: 'center',
     justifyContent: 'center',
     gap: spacing.xs,
   },
   tileOverlayText: {
-    color: '#FFFFFF',
+    color: colors.textInverse,
     fontSize: 11,
     fontFamily: fonts.semiBold,
     fontWeight: '600',

@@ -15,6 +15,8 @@ export interface Room {
   id: string;
   move_id: string;
   name: string;
+  /** Hand-picked room icon (migration 020). NULL = derive from the name. */
+  emoji: string | null;
 }
 
 export interface Box {
@@ -24,6 +26,7 @@ export interface Box {
   created_by: string;
   created_at: string;
   label_written: boolean;
+  is_packed: boolean;
 }
 
 export interface Item {
