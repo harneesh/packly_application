@@ -1,12 +1,10 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
-  Easing,
   LayoutAnimation,
   Modal,
-  PanResponder,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -18,6 +16,16 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Reanimated, {
+  Easing,
+  cancelAnimation,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import ListRow from '../../../packly-ui/components/ListRow';
@@ -58,6 +66,39 @@ type MoveProgress = {
 
 /** Box shape returned by the Home box list (box + live item count). */
 type HomeBox = Box & { item_count: number };
+
+/** Spring that settles the room section after a swipe (in, or back to rest). */
+const ROOM_SPRING = { damping: 22, stiffness: 220, mass: 0.9 };
+
+/**
+ * A room's boxes with live item counts. Shared by the selected room's query
+ * and the neighbour prefetch (so a swipe lands on cached content).
+ */
+async function fetchRoomBoxes(roomId: string): Promise<HomeBox[]> {
+  const { data, error } = await supabase
+    .from('boxes')
+    .select('*')
+    .eq('room_id', roomId)
+    .order('box_number', { ascending: true });
+  if (error) throw new Error(error.message);
+  const boxes = data ?? [];
+  if (boxes.length === 0) return [];
+
+  const boxIds = boxes.map((b) => b.id);
+  const { data: itemRows, error: itemError } = await supabase
+    .from('items')
+    .select('box_id')
+    .in('box_id', boxIds);
+  if (itemError) throw new Error(itemError.message);
+
+  const counts = new Map<string, number>();
+  for (const row of itemRows ?? []) {
+    counts.set(row.box_id, (counts.get(row.box_id) ?? 0) + 1);
+  }
+  // Natural box order ("Box 2" before "Box 10") — the SQL order above is
+  // lexicographic because box_number is TEXT.
+  return sortByBoxNumber(boxes.map((b) => ({ ...b, item_count: counts.get(b.id) ?? 0 })));
+}
 
 // ──────────────────────────────────────────
 // Data fetching
@@ -486,32 +527,7 @@ export default function HomeScreen() {
   // updates whenever the list refetches (realtime invalidation below).
   const { data: roomBoxes, isLoading: boxesLoading } = useQuery({
     queryKey: ['roomBoxes', selectedRoomId],
-    queryFn: async () => {
-      if (!selectedRoomId) return [];
-      const { data, error } = await supabase
-        .from('boxes')
-        .select('*')
-        .eq('room_id', selectedRoomId)
-        .order('box_number', { ascending: true });
-      if (error) throw new Error(error.message);
-      const boxes = data ?? [];
-      if (boxes.length === 0) return [];
-
-      const boxIds = boxes.map((b) => b.id);
-      const { data: itemRows, error: itemError } = await supabase
-        .from('items')
-        .select('box_id')
-        .in('box_id', boxIds);
-      if (itemError) throw new Error(itemError.message);
-
-      const counts = new Map<string, number>();
-      for (const row of itemRows ?? []) {
-        counts.set(row.box_id, (counts.get(row.box_id) ?? 0) + 1);
-      }
-      // Natural box order ("Box 2" before "Box 10") — the SQL order above is
-      // lexicographic because box_number is TEXT.
-      return sortByBoxNumber(boxes.map((b) => ({ ...b, item_count: counts.get(b.id) ?? 0 })));
-    },
+    queryFn: () => (selectedRoomId ? fetchRoomBoxes(selectedRoomId) : Promise.resolve([])),
     enabled: !!selectedRoomId,
   });
 
@@ -867,113 +883,140 @@ export default function HomeScreen() {
   // scoped to that section on purpose — the search bar, the progress card and
   // the room chips above it never move.
   //
-  // PanResponder + Animated (the same building blocks as the bottom sheets)
-  // rather than a pager library: the section lives inside the page's vertical
-  // ScrollView and its height changes per room, which no off-the-shelf pager
-  // handles well. The responder is memoised on the room list it pages through,
-  // so it always sees the current rooms without a stale closure.
+  // Gesture Handler + Reanimated, so the drag and every slide run on the UI
+  // thread: this screen re-renders a lot, and a JS-driven pan (PanResponder)
+  // stuttered whenever React was busy and could be stolen mid-drag by the
+  // page's vertical scroll. Here the pan only activates on a clearly
+  // horizontal drag (activeOffsetX) and gives up on a vertical one
+  // (failOffsetY), so the page's ScrollView keeps vertical scrolling.
+  //
+  // A committed swipe slides the section out on the UI thread, swaps the
+  // room on JS, and only slides the new room in AFTER it has rendered (see
+  // the layout effect below) — so the slide-in never competes with the
+  // render or shows the old room a second time.
   const { width: windowWidth } = useWindowDimensions();
-  const roomPanX = useRef(new Animated.Value(0)).current;
+  const roomPanX = useSharedValue(0);
   // True while a committed swipe is sliding out + in — blocks re-entry so two
-  // selections can never race each other.
-  const roomSwitchBusy = useRef(false);
+  // selections can never race each other. Read on the UI thread.
+  const roomSwitchBusy = useSharedValue(false);
+  // The committed swipe whose new room is waiting to slide in. A fresh object
+  // per swipe, so the slide-in effect below runs exactly once for each.
+  const [roomSlideIn, setRoomSlideIn] = useState<{ direction: 1 | -1 } | null>(null);
 
-  /** Put the section back at rest after a swipe that did not commit a room. */
-  const springRoomBack = useCallback(() => {
-    Animated.spring(roomPanX, {
-      toValue: 0,
-      useNativeDriver: true,
-      tension: 90,
-      friction: 12,
-    }).start();
-  }, [roomPanX]);
+  // Position of the selected room in the list, captured by the worklets.
+  const roomIndex = (rooms ?? []).findIndex((r) => r.id === selectedRoomId);
+  const roomCount = rooms?.length ?? 0;
 
-  /**
-   * Page to the neighbouring room. The current section slides out in the
-   * direction of the swipe, the selection is swapped while it is off-screen,
-   * and the new room slides in from the opposite edge — so the motion always
-   * reads as the rooms moving sideways, never as the page reloading.
-   */
-  const slideToRoom = useCallback(
+  const commitRoomSwipe = useCallback(
     (direction: 1 | -1) => {
       const list = rooms ?? [];
       const index = list.findIndex((r) => r.id === selectedRoomId);
       const next = index === -1 ? undefined : list[index + direction];
-      if (!next || roomSwitchBusy.current) return;
-
-      roomSwitchBusy.current = true;
-      Animated.timing(roomPanX, {
-        toValue: -direction * windowWidth,
-        duration: 140,
-        easing: Easing.out(Easing.quad),
-        useNativeDriver: true,
-      }).start(({ finished }) => {
-        if (!finished) {
-          roomSwitchBusy.current = false;
-          return;
-        }
-        setSelectedRoomId(next.id);
-        roomPanX.setValue(direction * windowWidth);
-        Animated.spring(roomPanX, {
-          toValue: 0,
-          useNativeDriver: true,
-          tension: 90,
-          friction: 13,
-        }).start(() => {
-          roomSwitchBusy.current = false;
-        });
-      });
+      if (!next) {
+        // The room list changed under the swipe — just bring the section back.
+        roomPanX.set(withSpring(0, ROOM_SPRING));
+        roomSwitchBusy.set(false);
+        return;
+      }
+      setRoomSlideIn({ direction });
+      setSelectedRoomId(next.id);
     },
-    [rooms, selectedRoomId, windowWidth, roomPanX],
+    [rooms, selectedRoomId, roomPanX, roomSwitchBusy],
   );
+
+  // The new room has rendered (still off-screen) — slide it in from the edge
+  // opposite the swipe. Layout effect: runs before the frame is painted.
+  useLayoutEffect(() => {
+    if (!roomSlideIn) return;
+    roomPanX.set(roomSlideIn.direction * windowWidth);
+    roomPanX.set(
+      withSpring(0, ROOM_SPRING, () => {
+        roomSwitchBusy.set(false);
+      }),
+    );
+    // windowWidth is read once per swipe on purpose — a rotation must not
+    // replay the last slide.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomSlideIn]);
+
+  // Warm the neighbouring rooms' boxes so a swipe lands on content instead of
+  // a spinner (and a section that changes height mid-slide).
+  useEffect(() => {
+    if (!rooms || roomIndex === -1) return;
+    for (const neighbour of [rooms[roomIndex - 1], rooms[roomIndex + 1]]) {
+      if (!neighbour) continue;
+      queryClient.prefetchQuery({
+        queryKey: ['roomBoxes', neighbour.id],
+        queryFn: () => fetchRoomBoxes(neighbour.id),
+        staleTime: 30 * 1000,
+      });
+    }
+  }, [rooms, roomIndex, queryClient]);
 
   const roomPager = useMemo(
     () =>
-      PanResponder.create({
+      Gesture.Pan()
         // Claim only a clearly HORIZONTAL drag, and only while another room is
         // within reach — taps and the page's vertical scroll are untouched.
-        onMoveShouldSetPanResponder: (_evt, g) =>
-          !roomSwitchBusy.current &&
-          (rooms?.length ?? 0) > 1 &&
-          Math.abs(g.dx) > 10 &&
-          Math.abs(g.dx) > Math.abs(g.dy) * 1.5,
-        onPanResponderGrant: () => {
+        .enabled(roomCount > 1)
+        .activeOffsetX([-12, 12])
+        .failOffsetY([-14, 14])
+        .onStart(() => {
           // A spring-back may still be running from the previous swipe — take
           // the value over cleanly instead of fighting it.
-          roomPanX.stopAnimation();
-        },
-        onPanResponderMove: (_evt, g) => {
-          if (roomSwitchBusy.current) return;
-          const list = rooms ?? [];
-          const index = list.findIndex((r) => r.id === selectedRoomId);
+          if (!roomSwitchBusy.get()) cancelAnimation(roomPanX);
+        })
+        .onUpdate((e) => {
+          if (roomSwitchBusy.get()) return;
           const atEdge =
-            (g.dx > 0 && index <= 0) || (g.dx < 0 && index === list.length - 1);
+            (e.translationX > 0 && roomIndex <= 0) ||
+            (e.translationX < 0 && roomIndex === roomCount - 1);
           // At the first/last room only a sliver follows the finger, so the
           // edge is FELT instead of the section sliding off into nothing.
-          roomPanX.setValue(g.dx * (atEdge ? 0.18 : 1));
-        },
-        onPanResponderRelease: (_evt, g) => {
-          if (roomSwitchBusy.current) return;
-          const list = rooms ?? [];
-          const index = list.findIndex((r) => r.id === selectedRoomId);
-          const direction: 1 | -1 = g.dx < 0 ? 1 : -1;
-          const target = index === -1 ? undefined : list[index + direction];
-          // A quick flick counts too, so a full-width drag is never required.
+          roomPanX.set(e.translationX * (atEdge ? 0.18 : 1));
+        })
+        .onEnd((e) => {
+          if (roomSwitchBusy.get()) return;
+          const direction: 1 | -1 = e.translationX < 0 ? 1 : -1;
+          const target = roomIndex + direction;
+          const hasTarget = roomIndex !== -1 && target >= 0 && target < roomCount;
+          // A quick flick counts too, so a full-width drag is never required —
+          // but a flick back against the drag cancels it.
           const farEnough =
-            Math.abs(g.dx) > Math.min(96, windowWidth * 0.3) || Math.abs(g.vx) > 0.5;
-          if (!target || !farEnough) {
-            springRoomBack();
+            Math.abs(e.translationX) > Math.min(96, windowWidth * 0.3) ||
+            Math.abs(e.velocityX) > 500;
+          const flickedBack = e.velocityX * e.translationX < 0 && Math.abs(e.velocityX) > 500;
+          if (!hasTarget || !farEnough || flickedBack) {
+            roomPanX.set(withSpring(0, ROOM_SPRING));
             return;
           }
-          slideToRoom(direction);
-        },
-        // Gesture stolen (the vertical scroll won) — put the section back.
-        onPanResponderTerminate: () => {
-          if (!roomSwitchBusy.current) springRoomBack();
-        },
-      }),
-    [rooms, selectedRoomId, windowWidth, roomPanX, slideToRoom, springRoomBack],
+          roomSwitchBusy.set(true);
+          roomPanX.set(
+            withTiming(
+              -direction * windowWidth,
+              { duration: 150, easing: Easing.out(Easing.quad) },
+              (finished) => {
+                if (finished) {
+                  runOnJS(commitRoomSwipe)(direction);
+                } else {
+                  roomSwitchBusy.set(false);
+                }
+              },
+            ),
+          );
+        })
+        .onFinalize((_e, success) => {
+          // Gesture cancelled (e.g. the vertical scroll won) — put it back.
+          if (!success && !roomSwitchBusy.get()) {
+            roomPanX.set(withSpring(0, ROOM_SPRING));
+          }
+        }),
+    [roomCount, roomIndex, windowWidth, roomPanX, roomSwitchBusy, commitRoomSwipe],
   );
+
+  const roomSectionStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: roomPanX.get() }],
+  }));
 
   // ── Keep the selected room's chip on screen ──────────────
   // A swipe can land on a room whose chip has scrolled out of the row, which
@@ -1428,12 +1471,8 @@ export default function HomeScreen() {
                       room. The pan is scoped to the section on purpose — the
                       search bar, the progress card and the room chips above it
                       stay exactly where they are. ── */}
-                  <Animated.View
-                    style={[
-                      styles.selectedRoomSection,
-                      { transform: [{ translateX: roomPanX }] },
-                    ]}
-                    {...roomPager.panHandlers}>
+                  <GestureDetector gesture={roomPager}>
+                  <Reanimated.View style={[styles.selectedRoomSection, roomSectionStyle]}>
                     <View style={styles.selectedRoomHeader}>
                       <Text style={font.title}>{selectedRoom?.name ?? 'Select a room'}</Text>
                       <Text style={styles.selectedRoomCount}>
@@ -1500,7 +1539,8 @@ export default function HomeScreen() {
                         </Pressable>
                       </View>
                     )}
-                  </Animated.View>
+                  </Reanimated.View>
+                  </GestureDetector>
                 </>
               ) : (
                 <View style={styles.noRoomsWrap}>

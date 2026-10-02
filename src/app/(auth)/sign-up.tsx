@@ -3,16 +3,17 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import { Link, router } from 'expo-router';
+import { FontAwesome } from '@expo/vector-icons';
 import { useAuthStore } from '@/store/auth-store';
-import { Link } from 'expo-router';
+import AuthLogo from '@/components/auth-logo';
 import { colors, spacing, radius, font, fonts, shadow } from '../../../packly-ui/theme';
 
 export default function SignUpScreen() {
@@ -20,13 +21,26 @@ export default function SignUpScreen() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [signedUp, setSignedUp] = useState(false);
-  const { signUp, isLoading, error, clearError } = useAuthStore();
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const { signUp, signInWithGoogle, isLoading, error, clearError } = useAuthStore();
 
   const handleSignUp = async () => {
     if (!name.trim() || !email.trim() || !password.trim()) return;
     if (password.length < 6) return;
     const success = await signUp(name.trim(), email.trim(), password);
     if (success) setSignedUp(true);
+  };
+
+  // Google creates the Packly account on first use, so "Continue with Google"
+  // is the same flow as on Sign In — no email confirmation step needed.
+  const handleGoogleSignUp = async () => {
+    if (isLoading || googleLoading) return;
+    setGoogleLoading(true);
+    try {
+      await signInWithGoogle();
+    } finally {
+      setGoogleLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -45,7 +59,7 @@ export default function SignUpScreen() {
           <Text style={font.largeTitle}>Check Your Email</Text>
           <View style={[styles.successBox, { backgroundColor: colors.packedSoft }]}>
             <Text style={{ color: colors.packed, textAlign: 'center', fontFamily: fonts.medium }}>
-              Account created! We've sent a confirmation link to your email. Please verify your
+              Account created! We&apos;ve sent a confirmation link to your email. Please verify your
               email address before signing in.
             </Text>
           </View>
@@ -68,90 +82,118 @@ export default function SignUpScreen() {
         behavior="padding"
         style={styles.container}
       >
-        <View style={styles.header}>
-          <View style={styles.logoTile}>
-            <Ionicons name="cube" size={30} color="#FFFFFF" />
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.header}>
+            <AuthLogo />
+            <Text style={font.largeTitle}>Create Account</Text>
+            <Text style={[font.body, { color: colors.textSecondary }]}>
+              Sign up to start packing with Packly
+            </Text>
           </View>
-          <Text style={font.largeTitle}>Create Account</Text>
-          <Text style={[font.body, { color: colors.textSecondary }]}>
-            Sign up to start packing with Packly
-          </Text>
-        </View>
 
-        <View style={styles.form}>
-          {error ? (
-            <View style={[styles.errorBox, { backgroundColor: colors.dangerSoft }]}>
-              <Text style={{ color: colors.danger }}>{error}</Text>
-            </View>
-          ) : null}
+          <View style={styles.form}>
+            {error ? (
+              <View style={[styles.errorBox, { backgroundColor: colors.dangerSoft }]}>
+                <Text style={{ color: colors.danger }}>{error}</Text>
+              </View>
+            ) : null}
 
-          <Text style={styles.label}>Name</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Your name"
-            placeholderTextColor={colors.textTertiary}
-            value={name}
-            onChangeText={(text) => { setName(text); clearError(); }}
-            autoCapitalize="words"
-            editable={!isLoading}
-            maxLength={100}
-          />
+            <Text style={styles.label}>Name</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Your name"
+              placeholderTextColor={colors.textTertiary}
+              value={name}
+              onChangeText={(text) => { setName(text); clearError(); }}
+              autoCapitalize="words"
+              editable={!isLoading}
+              maxLength={100}
+            />
 
-          <Text style={styles.label}>Email</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="you@example.com"
-            placeholderTextColor={colors.textTertiary}
-            value={email}
-            onChangeText={(text) => { setEmail(text); clearError(); }}
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="email-address"
-            editable={!isLoading}
-            maxLength={254}
-          />
+            <Text style={styles.label}>Email</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="you@example.com"
+              placeholderTextColor={colors.textTertiary}
+              value={email}
+              onChangeText={(text) => { setEmail(text); clearError(); }}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="email-address"
+              editable={!isLoading}
+              maxLength={254}
+            />
 
-          <Text style={styles.label}>Password</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="At least 6 characters"
-            placeholderTextColor={colors.textTertiary}
-            value={password}
-            onChangeText={(text) => { setPassword(text); clearError(); }}
-            secureTextEntry
-            editable={!isLoading}
-            returnKeyType="done"
-            onSubmitEditing={handleSignUp}
-            maxLength={128}
-          />
+            <Text style={styles.label}>Password</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="At least 6 characters"
+              placeholderTextColor={colors.textTertiary}
+              value={password}
+              onChangeText={(text) => { setPassword(text); clearError(); }}
+              secureTextEntry
+              editable={!isLoading}
+              returnKeyType="done"
+              onSubmitEditing={handleSignUp}
+              maxLength={128}
+            />
 
-          <Pressable
-            style={({ pressed }) => [
-              styles.button,
-              { backgroundColor: colors.primary },
-              pressed && { opacity: 0.85 },
-            ]}
-            onPress={handleSignUp}
-            disabled={isLoading}
-          >
-            {isLoading ? (
-              <ActivityIndicator color="#FFFFFF" />
-            ) : (
-              <Text style={styles.buttonText}>Sign Up</Text>
-            )}
-          </Pressable>
-        </View>
-
-        <View style={styles.footer}>
-          <Text style={[font.body, { color: colors.textSecondary }]}>
-            Already have an account?{' '}
-          </Text>
-          <Link href="/sign-in" asChild>
-            <Pressable>
-              <Text style={{ color: colors.primary, fontFamily: fonts.semiBold, fontWeight: '600' }}>Sign In</Text>
+            <Pressable
+              style={({ pressed }) => [
+                styles.button,
+                { backgroundColor: colors.primary },
+                pressed && { opacity: 0.85 },
+              ]}
+              onPress={handleSignUp}
+              disabled={isLoading || googleLoading}
+            >
+              {isLoading && !googleLoading ? (
+                <ActivityIndicator color="#FFFFFF" />
+              ) : (
+                <Text style={styles.buttonText}>Sign Up</Text>
+              )}
             </Pressable>
-          </Link>
-        </View>
+
+            <View style={styles.divider}>
+              <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+              <Text style={[font.caption, { color: colors.textSecondary }]}>or</Text>
+              <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+            </View>
+
+            <Pressable
+              style={({ pressed }) => [
+                styles.googleButton,
+                pressed && { opacity: 0.85 },
+              ]}
+              onPress={handleGoogleSignUp}
+              disabled={isLoading || googleLoading}
+            >
+              {googleLoading ? (
+                <ActivityIndicator color="#4285F4" />
+              ) : (
+                <>
+                  <FontAwesome name="google" size={18} color="#4285F4" />
+                  <Text style={styles.googleButtonText}>Continue with Google</Text>
+                </>
+              )}
+            </Pressable>
+          </View>
+
+          <View style={styles.footer}>
+            <Text style={[font.body, { color: colors.textSecondary }]}>
+              Already have an account?{' '}
+            </Text>
+            <Link href="/sign-in" asChild>
+              <Pressable>
+                <Text style={{ color: colors.primary, fontFamily: fonts.semiBold, fontWeight: '600' }}>Sign In</Text>
+              </Pressable>
+            </Link>
+          </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -163,25 +205,19 @@ const styles = StyleSheet.create({
   },
   container: {
     flex: 1,
-    paddingHorizontal: spacing.xxl,
+  },
+  // Centred like Sign In, but scrollable — the form plus Google button can be
+  // taller than a small screen (or what the keyboard leaves of it).
+  scrollContent: {
+    flexGrow: 1,
     justifyContent: 'center',
+    paddingHorizontal: spacing.xxl,
+    paddingVertical: spacing.xxl,
   },
   header: {
     alignItems: 'center',
     marginBottom: spacing.xxxl,
     gap: spacing.sm,
-  },
-  // Brand mark — same indigo tile as Sign In.
-  logoTile: {
-    width: 64,
-    height: 64,
-    borderRadius: radius.lg,
-    backgroundColor: colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: spacing.sm,
-    borderCurve: 'continuous',
-    ...shadow.card,
   },
   form: {
     gap: spacing.md,
@@ -227,6 +263,35 @@ const styles = StyleSheet.create({
   errorBox: {
     padding: spacing.md,
     borderRadius: radius.md,
+  },
+  divider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    marginVertical: spacing.sm,
+  },
+  dividerLine: {
+    flex: 1,
+    height: StyleSheet.hairlineWidth,
+  },
+  // Same Google button as Sign In.
+  googleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.md,
+    backgroundColor: colors.surface,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    borderRadius: radius.pill,
+    height: 52,
+    borderCurve: 'continuous',
+  },
+  googleButtonText: {
+    fontSize: 16,
+    fontFamily: fonts.bold,
+    fontWeight: '700',
+    color: colors.textPrimary,
   },
   footer: {
     flexDirection: 'row',

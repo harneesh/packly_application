@@ -906,7 +906,10 @@ export default function BoxDetailsScreen() {
               <Text style={styles.heroTitle}>Tap and say what you packed</Text>
               <ExamplePhrases />
               {availableCredits !== null && (
-                <View
+                <Pressable
+                  // Out of recordings → the pill becomes the way to the paywall.
+                  disabled={!outOfCredits}
+                  onPress={() => router.push('/paywall')}
                   style={[
                     styles.creditsPill,
                     outOfCredits && { backgroundColor: colors.dangerSoft },
@@ -917,7 +920,7 @@ export default function BoxDetailsScreen() {
                       ? 'Upgrade to Pro for more recordings'
                       : `${availableCredits} recording${availableCredits !== 1 ? 's' : ''} left`}
                   </Text>
-                </View>
+                </Pressable>
               )}
               {sharedCreditPool !== null && sharedCreditPool > 0 ? (
                 <Text style={styles.sharedCreditsHint}>

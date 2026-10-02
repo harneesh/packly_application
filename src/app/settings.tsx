@@ -104,7 +104,8 @@ export default function SettingsScreen() {
 
   // Free/Pro plan (RevenueCat). Display + purchase actions come from the
   // shared hook — this screen owns no purchase logic of its own.
-  const { isPro, rcEnabled, isPurchasing, isRestoring, upgrade, restore } = useUpgrade();
+  // The upgrade pill opens the paywall (Free vs Pro), which runs the purchase.
+  const { isPro, rcEnabled, isPurchasing, isRestoring, restore } = useUpgrade();
 
   const [showSignOutConfirm, setShowSignOutConfirm] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
@@ -364,7 +365,7 @@ export default function SettingsScreen() {
                       styles.upgradeButton,
                       pressed && { opacity: 0.85 },
                     ]}
-                    onPress={upgrade}
+                    onPress={() => router.push('/paywall')}
                     disabled={isPurchasing}>
                     {isPurchasing ? (
                       <ActivityIndicator size="small" color={colors.textInverse} />

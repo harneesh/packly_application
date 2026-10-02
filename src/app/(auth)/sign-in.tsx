@@ -8,9 +8,10 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { FontAwesome, Ionicons } from '@expo/vector-icons';
+import { FontAwesome } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuthStore } from '@/store/auth-store';
+import AuthLogo from '@/components/auth-logo';
 import { Link } from 'expo-router';
 import { colors, spacing, radius, font, fonts, shadow } from '../../../packly-ui/theme';
 
@@ -42,9 +43,7 @@ export default function SignInScreen() {
         style={styles.container}
       >
         <View style={styles.header}>
-          <View style={styles.logoTile}>
-            <Ionicons name="cube" size={30} color="#FFFFFF" />
-          </View>
+          <AuthLogo />
           <Text style={font.largeTitle}>Sign In</Text>
           <Text style={[font.body, { color: colors.textSecondary }]}>
             Sign in to your Packly account
@@ -129,7 +128,7 @@ export default function SignInScreen() {
 
         <View style={styles.footer}>
           <Text style={[font.body, { color: colors.textSecondary }]}>
-            Don't have an account?{' '}
+            Don&apos;t have an account?{' '}
           </Text>
           <Link href="/sign-up" asChild>
             <Pressable>
@@ -155,18 +154,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: spacing.xxxl,
     gap: spacing.sm,
-  },
-  // Brand mark — indigo tile with the Packly box glyph.
-  logoTile: {
-    width: 64,
-    height: 64,
-    borderRadius: radius.lg,
-    backgroundColor: colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: spacing.sm,
-    borderCurve: 'continuous',
-    ...shadow.card,
   },
   form: {
     gap: spacing.md,

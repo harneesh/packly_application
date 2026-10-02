@@ -1,6 +1,6 @@
 import { Stack, DefaultTheme, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import {
   useFonts,
@@ -13,6 +13,7 @@ import {
 } from '@expo-google-fonts/poppins';
 
 import { Providers } from '@/services/providers';
+import AnimatedSplash from '@/components/animated-splash';
 import { useAuthStore } from '@/store/auth-store';
 
 SplashScreen.preventAutoHideAsync();
@@ -43,12 +44,12 @@ export default function RootLayout() {
 
   // The splash covers startup work: fonts + auth hydration + reading the
   // persisted query cache back, so the first visible frame is populated
-  // instead of showing spinners.
-  useEffect(() => {
-    if (!isLoading && fontsLoaded && cacheRestored) {
-      SplashScreen.hideAsync();
-    }
-  }, [isLoading, fontsLoaded, cacheRestored]);
+  // instead of showing spinners. Once that is done, the animated logo intro
+  // (components/animated-splash.tsx) hides the native splash and plays over
+  // the app, which renders underneath it.
+  const appReady = !isLoading && fontsLoaded && cacheRestored;
+  const [introDone, setIntroDone] = useState(false);
+  const handleIntroFinish = useCallback(() => setIntroDone(true), []);
 
   if (!fontsLoaded) {
     return null;
@@ -93,9 +94,15 @@ export default function RootLayout() {
               }}
             />
             <Stack.Screen name="faq" options={{ animation: 'slide_from_right' }} />
+            {/* Paywall (Free vs Pro) slides up over whatever opened it. */}
+            <Stack.Screen
+              name="paywall"
+              options={{ presentation: 'modal', animation: 'slide_from_bottom' }}
+            />
           </Stack>
         </ThemeProvider>
       </Providers>
+      {!introDone && <AnimatedSplash ready={appReady} onFinish={handleIntroFinish} />}
     </GestureHandlerRootView>
   );
 }
