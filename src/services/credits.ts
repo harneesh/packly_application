@@ -21,6 +21,12 @@ export interface CreditBalance {
    * or null when the remaining balance is entirely free credits.
    */
   expiresAt: string | null;
+  /**
+   * The free bucket on its own (never expires). Needed wherever a move's
+   * shared pool is added on top: a payer's own Pro credits are already IN
+   * that pool, so only their free credits may be added to it.
+   */
+  freeBalance: number;
 }
 
 interface CreditRow {
@@ -29,15 +35,25 @@ interface CreditRow {
 }
 
 export async function fetchCreditBalance(): Promise<CreditBalance> {
-  const { data, error } = await supabase.rpc('get_credit_balance');
+  // The effective balance comes from the RPC (it applies Pro expiry at read
+  // time); the free bucket is read from the caller's own row (RLS: own row only).
+  const [balanceRes, rowRes] = await Promise.all([
+    supabase.rpc('get_credit_balance'),
+    supabase.from('user_credits').select('free_balance').maybeSingle(),
+  ]);
 
-  if (error) throw new Error(error.message);
+  if (balanceRes.error) throw new Error(balanceRes.error.message);
 
-  const row = (data as CreditRow[] | null)?.[0];
+  const row = (balanceRes.data as CreditRow[] | null)?.[0];
+  const balance = row?.balance ?? 0;
+  // If the row can't be read, assume no free credits — that can only
+  // under-count a payer's total (by their few free credits), never inflate it.
+  const free = rowRes.error ? 0 : (rowRes.data?.free_balance ?? 0);
 
   return {
-    balance: row?.balance ?? 0,
+    balance,
     // The server only returns expires_at while the Pro window is live.
     expiresAt: row?.expires_at ?? null,
+    freeBalance: Math.min(free, balance),
   };
 }

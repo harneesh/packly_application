@@ -30,7 +30,7 @@ import { colors, spacing, font, radius, shadow, fonts } from '../../../packly-ui
 import { supabase } from '@/services/supabase';
 import { processAudio } from '@/services/voice';
 import { fetchCreditBalance } from '@/services/credits';
-import { useMoveCreditPool } from '@/hooks/use-move-plan';
+import { useMoveCreditPool, useMovePlan } from '@/hooks/use-move-plan';
 import ConfirmModal from '@/components/confirm-modal';
 import ModalBackdrop from '@/components/modal-backdrop';
 import LabelPromptModal from '@/components/label-prompt-modal';
@@ -237,15 +237,26 @@ export default function BoxDetailsScreen() {
     queryFn: fetchCreditBalance,
     staleTime: 60 * 1000,
   });
-  const creditsRemaining = credits?.balance ?? null;
 
   // Pro is shared with the move: the server spends the move's pooled Pro
   // credits BEFORE this user's own, so the recordings actually available here
   // are the personal balance plus whatever a covering member contributed. A
   // member with no credits of their own can still record inside a Pro move.
+  //
+  // When THIS user is one of the move's payers, their own Pro credits are
+  // already part of the pool — adding their full balance on top would count
+  // them twice (200 Pro showing as 400). So a payer gets pool + free only.
   const { pool: sharedCreditPool } = useMoveCreditPool(room?.move_id);
+  const { plan: movePlan } = useMovePlan(room?.move_id);
+  const ownCountedInPool = movePlan?.isPayer ?? false;
+  const ownCredits =
+    credits == null
+      ? null
+      : ownCountedInPool
+        ? (credits.freeBalance ?? 0)
+        : credits.balance;
   const availableCredits =
-    creditsRemaining === null ? null : creditsRemaining + (sharedCreditPool ?? 0);
+    ownCredits === null ? null : ownCredits + (sharedCreditPool ?? 0);
   const outOfCredits = availableCredits === 0;
 
   // ── Photo count — shares the ['box-photos', id] cache entry BoxPhotos
@@ -584,13 +595,16 @@ export default function BoxDetailsScreen() {
         // be the move's shared pool rather than this user's own balance — so
         // refetch instead of writing the number straight into the personal
         // balance cache.
+        // The charge may have come out of the shared pool, so refresh both.
         if (typeof result.creditsRemaining === 'number') {
           queryClient.invalidateQueries({ queryKey: ['credits'] });
+          queryClient.invalidateQueries({ queryKey: ['move-credit-pool'] });
         }
       } else {
         if (result.code === 'OUT_OF_CREDITS') {
           // The cached balance was stale — refetch so the UI gates correctly.
           queryClient.invalidateQueries({ queryKey: ['credits'] });
+          queryClient.invalidateQueries({ queryKey: ['move-credit-pool'] });
         }
         setVoiceError(result.error);
         setVoiceState('error');
@@ -924,7 +938,9 @@ export default function BoxDetailsScreen() {
               )}
               {sharedCreditPool !== null && sharedCreditPool > 0 ? (
                 <Text style={styles.sharedCreditsHint}>
-                  {sharedCreditPool} of these are shared with this move by a Pro member
+                  {ownCountedInPool
+                    ? `${sharedCreditPool} of these are Pro credits shared with everyone in this move`
+                    : `${sharedCreditPool} of these are shared with this move by a Pro member`}
                 </Text>
               ) : null}
             </View>
